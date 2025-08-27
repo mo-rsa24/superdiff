@@ -2,6 +2,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import *
 from numpy import ndarray
+import functools
 
 beta_0 = 0.1
 beta_1 = 20.0
@@ -121,3 +122,36 @@ def get_kappa(t, divlogs, sdlogdxs):
     kappa = jnp.exp(log_sigma(t))*(divlog_1-divlog_2) + (sdlogdx_1*(sdlogdx_1-sdlogdx_2)).sum(1, keepdims=True)
     kappa /= ((sdlogdx_1-sdlogdx_2)**2).sum(1, keepdims=True)
     return kappa
+
+
+# @title Set up the SDE
+
+def marginal_prob_std(t, sigma):
+  """Compute the mean and standard deviation of $p_{0t}(x(t) | x(0))$.
+
+  Args:
+    t: A vector of time steps.
+    sigma: The $\sigma$ in our SDE.
+
+  Returns:
+    The standard deviation.
+  """
+  return jnp.sqrt((sigma ** (2 * t) - 1.) / 2. / jnp.log(sigma))
+
+
+def diffusion_coeff(t, sigma):
+  """Compute the diffusion coefficient of our SDE.
+
+  Args:
+    t: A vector of time steps.
+    sigma: The $\sigma$ in our SDE.
+
+  Returns:
+    The vector of diffusion coefficients.
+  """
+  return sigma ** t
+
+
+sigma = 25.0  # @param {'type':'number'}
+marginal_prob_std_fn = functools.partial(marginal_prob_std, sigma=sigma)
+diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma)
