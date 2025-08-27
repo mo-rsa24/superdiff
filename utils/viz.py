@@ -2,8 +2,12 @@ import numpy as np
 from typing import Tuple, Optional
 from jax import random
 import matplotlib.pyplot as plt
+from tensorflow.python.data.ops.prefetch_op import _PrefetchDataset
+import tensorflow as tf
 from datasets.Gaussians import GaussianDataset
 from diffusion.equations import q_t
+from utils.image_manipulation import rescale_for_visualization
+
 
 def scatter_plot(data, figsize: Tuple[int,int] =(23,5)):
     plt.figure(figsize=figsize)
@@ -175,3 +179,21 @@ def visualize_compositions(superposed_trajectory, samples, labels, figsize: Tupl
             plt.legend(fontsize=15)
     plt.suptitle(title, fontsize=20)
     plt.show()
+
+def plot_grid(train: _PrefetchDataset):
+     data = next(iter(train))
+     imgs = data['image']  # shape: (1, 128, 32, 32, 3)
+     labels = data['label']  # shape: (1, 128) if present
+     imgs = rescale_for_visualization(imgs)
+     grid = imgs[:64]
+     rows, cols = 8, 8
+     fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.6, rows * 1.6))
+     axes = axes.ravel()
+
+     for i in range(rows * cols):
+         axes[i].imshow(grid[i])
+         axes[i].axis('off')
+         if labels is not None:
+            axes[i].set_title(int(tf.squeeze(labels)[i]), fontsize=8)
+     plt.tight_layout()
+     plt.show()

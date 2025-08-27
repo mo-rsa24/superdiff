@@ -8,6 +8,30 @@ from config import Config
 from jax import random
 
 
+def get_sdlogqdx_fn(model, params, train: bool = False):
+    """
+    Equivalent to `sdlogqdx = lambda _t, _x: state.apply_fn(params, _t, _x)`  # 🔻qt(x)
+    Returns a function that evaluates ∇ log q_t(x) (score function).
+
+    Args:
+        model: Flax Module
+        params: parameters to apply
+        train: whether to run in training mode (affects dropout/BN if present)
+
+    Returns:
+        sdlogqdx(t, x, rng=None) -> model output
+    """
+    def sdlogqdx(t, x, rng=None):
+        variables = {"params": params}
+        if not train:
+            return model.apply(variables, t, x, train=False, mutable=False)
+        else:
+            rngs = {"dropout": rng} if rng is not None else None
+            return model.apply(variables, t, x, train=True, mutable=False, rngs=rngs)
+
+    return sdlogqdx
+
+
 def score_loss(state, key, params, batch):
     datapoints, dimension  = batch.shape
     keys = random.split(key, )

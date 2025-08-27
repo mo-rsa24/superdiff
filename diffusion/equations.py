@@ -20,6 +20,33 @@ def q_t(data, t, standard_noise): # Forward Diffusion
   x_t = jnp.exp(log_alpha(t))*data + jnp.exp(log_sigma(t))*standard_noise
   return x_t
 
+
+def get_sdlogqdx_fn(model, params, train: bool = False):
+  """
+  Equivalent to `sdlogqdx = lambda _t, _x: state.apply_fn(params, _t, _x)`  # 🔻qt(x)
+  Returns a function that evaluates ∇ log q_t(x) (score function).
+
+  Args:
+      model: Flax Module
+      params: parameters to apply
+      train: whether to run in training mode (affects dropout/BN if present)
+
+  Returns:
+      sdlogqdx(t, x, rng=None) -> model output
+  """
+
+  def sdlogqdx(t, x, labels=None, rng=None):
+    variables = {"params": params}
+    kwargs = dict(train=train, mutable=False)
+    if rng is not None:
+      kwargs["rngs"] = {"dropout": rng}
+    # If your model is conditional, it likely has signature (t, x, labels, ...)
+    if labels is None:
+      return model.apply(variables, t, x, **kwargs)
+    else:
+      return model.apply(variables, t, x, labels, **kwargs)
+  return sdlogqdx
+
 def last_step_in_forward_diffusion(key, data, timesteps: ndarray = np.linspace(0.0, 1.0, 6)):
   return forward_diffusion_over_time(key, data, timesteps)[-1]
 
@@ -36,9 +63,11 @@ def forward_diffusion_over_time(key, data, timesteps: ndarray = np.linspace(0.0,
   return x_ts
 
 @jax.jit
-def vector_field(state, t,x,xi: float=0.0, stochastic_sampling: bool = True):
-  sdlogqdx = lambda _t, _x: state.apply_fn(state.params, _t, _x) # Score Function
-  if stochastic_sampling:
+def vector_field(model, state, t, data, labels, xi: float=0.0, stochastic_sampling: int = 0):
+  x, _ = data
+  t = t*jnp.ones((x.shape[0],1,1,1))
+  sdlogqdx = get_sdlogqdx_fn(model, state.model_params, train=False)
+  if stochastic_sampling == 0:
     """
     Type: Reverse SDE Sampler (DDIM)
     SDE: If you want stochastic sampling (reverse diffusion with noise)
@@ -48,7 +77,9 @@ def vector_field(state, t,x,xi: float=0.0, stochastic_sampling: bool = True):
       you’d need to integrate over all random noise paths that could reach that point.
     - That expectation is intractable without special tricks (e.g. Monte Carlo path sampling).
     """
-    dxdt = dlog_alphadt(t) * x - 2 * beta(t) * sdlogqdx(t, x) # Default in DDPM
+    dxdt = dlog_alphadt(t) * x - 2 * beta(t) * sdlogqdx(t, x, labels) # Default in DDPM
+  elif stochastic_sampling == 1:
+    dxdt = dlog_alphadt(t) * x - beta(t) * sdlogqdx(t, x, labels)  # Match super-diffusion dataset
   else:
     """
     Type: Probability-Flow ODE Sampler (Deterministic)
@@ -58,7 +89,7 @@ def vector_field(state, t,x,xi: float=0.0, stochastic_sampling: bool = True):
     Benefit: Allows likelihood evaluation
     💖 Trick: This is tractable with Hutchinson’s trace trick
     """
-    dxdt = dlog_alphadt(t) * x - beta(t) * sdlogqdx(t, x) - xi * beta(t) / jnp.exp(log_sigma(t)) * sdlogqdx(t, x)
+    dxdt = dlog_alphadt(t) * x - beta(t) * sdlogqdx(t, x, labels) - xi * beta(t) / jnp.exp(log_sigma(t)) * sdlogqdx(t, x, labels)
   return dxdt
 
 
