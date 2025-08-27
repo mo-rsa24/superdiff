@@ -7,7 +7,9 @@ from jax import random
 
 from utils.viz import visualize_forward_and_reverse_diffusion, \
     visualize_log_likelihood_along_superposed_trajectory, \
-    visualize_forward_diffusion_process_of_samples_over_time, visualize_composition
+    visualize_forward_diffusion_process_of_samples_over_time, visualize_composition, \
+    visualize_forward_diffusion_process_of_all_groups_over_time, visualize_forward_and_reverse_diffusion_on_all_latents, \
+    visualize_compositions
 
 key = random.PRNGKey(Config.SEED)
 key, init_key = random.split(key)
@@ -19,10 +21,8 @@ from datasets.Gaussians import GaussianDataset
 gaussian_dataset = GaussianDataset()
 
 ul, ur, lr, ll = gaussian_dataset.get_quadrants(subsample=True)
-visualize_forward_diffusion_process_of_samples_over_time(key, ul, ul.shape)
-visualize_forward_diffusion_process_of_samples_over_time(key, ur, ur.shape)
-visualize_forward_diffusion_process_of_samples_over_time(key, ll, ll.shape)
-visualize_forward_diffusion_process_of_samples_over_time(key, lr, lr.shape)
+datapoints, coordinates = ul.shape
+t_shape = (datapoints, 1)
 
 ul_steps = forward_diffusion_over_time(gaussian_dataset.key, ul)
 ul_forward = forward_diffusion_over_time(gaussian_dataset.key, ul)[-1]
@@ -35,46 +35,48 @@ ll_forward = forward_diffusion_over_time(gaussian_dataset.key, ll)[-1]
 
 lr_steps = forward_diffusion_over_time(gaussian_dataset.key, lr)
 lr_forward = forward_diffusion_over_time(gaussian_dataset.key, lr)[-1]
+labels = ["Upper Left", "Upper Right", "Lower Right", "Lower Left"]
+samples = [ul_steps, ur_steps, lr_steps, ll_steps]
+visualize_forward_diffusion_process_of_all_groups_over_time(samples, labels)
 
 
 
-model_ul = GaussianMLP(num_hid=512, num_out=2)
-model_ur = GaussianMLP(num_hid=512, num_out=2)
-model_ll = GaussianMLP(num_hid=512, num_out=2)
-model_lr = GaussianMLP(num_hid=512, num_out=2)
+model_ul = GaussianMLP(num_hid=datapoints, num_out=coordinates)
+model_ur = GaussianMLP(num_hid=datapoints, num_out=coordinates)
+model_ll = GaussianMLP(num_hid=datapoints, num_out=coordinates)
+model_lr = GaussianMLP(num_hid=datapoints, num_out=coordinates)
 
-ul_loss, ul_state = train_group(model_ul, ul, ur_forward)
+ul_loss, ul_state = train_group(model_ul, ul, ul_forward, t_shape=t_shape)
 ul_trajectory = reverse_sde(ul_state, ul, key)
-visualize_forward_and_reverse_diffusion(ul_steps, ul_trajectory)
 
-ur_loss, ur_state = train_group(model_ur, ur, ur_forward)
+ur_loss, ur_state = train_group(model_ur, ur, ur_forward, t_shape=t_shape)
 ur_trajectory = reverse_sde(ur_state, ur, key)
-visualize_forward_and_reverse_diffusion(ur_steps, ur_trajectory)
 
-lr_loss, lr_state = train_group(model_lr, lr, ur_forward)
+lr_loss, lr_state = train_group(model_lr, lr, lr_forward, t_shape=t_shape)
 lr_trajectory = reverse_sde(lr_state, lr, key)
-visualize_forward_and_reverse_diffusion(lr_steps, lr_trajectory)
 
-ll_loss, ll_state = train_group(model_ll, ll, ur_forward)
+ll_loss, ll_state = train_group(model_ll, ll, ll_forward, t_shape=t_shape)
 ll_trajectory = reverse_sde(ll_state, ll, key)
-visualize_forward_and_reverse_diffusion(ll_steps, ll_trajectory)
+
+trajectories = [ul_trajectory, ur_trajectory, lr_trajectory, ll_trajectory]
+visualize_forward_and_reverse_diffusion_on_all_latents(samples, trajectories, labels, title="Forward & Reverse Diffusion Over Samples")
 
 
 trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ul_state, ur_state, key)
 visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
-visualize_composition(trajectory, ul_steps, ur_steps)
+visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Upper Left & Upper Right")
 
 
 trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ll_state, lr_state, key)
 visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
-visualize_composition(trajectory, ll_state, lr_state)
+visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Lower Left & Lower Right")
 
 
 trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ul_state, ll_state, key)
 visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
-visualize_composition(trajectory, ul_steps, ll_steps)
+visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Upper Left & Lower Left")
 
 
 trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ur_state, lr_state, key)
 visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
-visualize_composition(trajectory, ur_steps, lr_steps)
+visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Upper Right & Lower Right")

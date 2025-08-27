@@ -104,7 +104,7 @@ def visualize_forward_and_reverse_diffusion_on_all_latents(samples, generated_da
         t = timesteps[reverse_index]
         for j, (label, sub_samples, gen_data) in enumerate(zip(labels, samples, generated_data)):
             plt.scatter(sub_samples[reverse_index][:, 0], sub_samples[reverse_index][:, 1], label=label, s=10, )
-            plt.scatter(gen_data[:, int(gen_num_timesteps*(timesteps[i])),0], gen_data[:, int(gen_num_timesteps*(timesteps[i])),1], label=f'{label} gen data',s=10, alpha=0.5)
+            plt.scatter(gen_data[:, int(gen_num_timesteps*(timesteps[i])),0], gen_data[:, int(gen_num_timesteps*(timesteps[i])),1], label=f'{label} Gen Data',s=10, alpha=0.5)
         plt.title(f't={t}')
         plt.xlim(lim)
         plt.ylim(lim)

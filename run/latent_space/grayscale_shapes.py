@@ -23,7 +23,7 @@ idx_to_shape = {i: s for i, s in shape_to_idx.items()}
 key = random.PRNGKey(Config.SEED)
 key, circle_key, square_key = random.split(key, 3)
 
-dataset = GrayscaleShapesDataset(shapes=shapes)
+dataset = GrayscaleShapesDataset(shapes=shapes, location_variation=True)
 batch_size = 512
 epochs = 1200
 dataloader = DataLoader(dataset, batch_size=len(dataset))

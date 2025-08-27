@@ -41,13 +41,13 @@ def train_mlp(key, state, sample_data):
         loss_plot[iter] = loss
     return loss_plot, state
 
-def train_group(model, sample_data, x_t):
+def train_group(model, sample_data, x_t, t_shape: tuple = (512, 1)):
     key = random.PRNGKey(Config.SEED)
     key, init_key = random.split(key)
     optimizer = optax.adam(learning_rate=2e-4)
     state = train_state.TrainState.create(
         apply_fn=model.apply,
-        params=model.init(init_key, np.ones((512, 1)), x_t),
+        params=model.init(init_key, np.ones(t_shape), x_t),
         tx=optimizer
     )
     loss, state = train_mlp(key, state, sample_data)

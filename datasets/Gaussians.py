@@ -85,7 +85,7 @@ class GaussianDataset:
         x_1 = random.randint(keys[0], minval=minval, maxval=maxval, shape=(datapoints, coordinates))
         # Keep your existing scaling and jitter so distributions match your current groups API
         x_1 = 3 * (x_1.astype(jnp.float32) - 0.5)
-        x_1 += 4e-1 * random.normal(keys[1], shape=(datapoints, coordinates))
+        # x_1 += 4e-1 * random.normal(keys[1], shape=(datapoints, coordinates))
         return x_1
 
     def get_quadrants(self, subsample: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:

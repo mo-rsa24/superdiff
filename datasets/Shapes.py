@@ -6,18 +6,18 @@ from torch.utils.data import Dataset
 from torchvision.transforms import Compose, ToTensor, Lambda, Grayscale
 from PIL import Image, ImageDraw, ImageFilter
 import numpy as np, tensorflow as tf, tensorflow_datasets as tfds
-
+import random as pyrandom
 
 class GrayscaleShapesDataset(Dataset):
     """
         Generates grayscale images of simple shapes.
     """
-    def __init__(self, shapes, size=10000, img_size=64):
+    def __init__(self, shapes, size=10000, img_size=64, location_variation: bool = False):
         self.size = size
         self.img_size = img_size
         self.shapes = shapes
         self.shape_to_idx = {s: i for i, s in enumerate(self.shapes)}
-
+        self.location_variation = location_variation
         self.transform = Compose([
             ToTensor(),
             Lambda(lambda t: (t * 2) - 1)  # Scale to [-1, 1]
@@ -37,6 +37,24 @@ class GrayscaleShapesDataset(Dataset):
             p3 = (self.img_size - margin, self.img_size - margin)
             draw.polygon([p1, p2, p3], fill="white")
 
+    def _draw_shape_with_location_variation(self, shape, draw):
+        margin = self.img_size // 4
+        dx = pyrandom.randint(-margin // 2, margin // 2)
+        dy = pyrandom.randint(-margin // 2, margin // 2)
+
+        top_left = (margin + dx, margin + dy)
+        bottom_right = (self.img_size - margin + dx, self.img_size - margin + dy)
+
+        if shape == "circle":
+            draw.ellipse([top_left, bottom_right], fill="white")
+        elif shape == "square":
+            draw.rectangle([top_left, bottom_right], fill="white")
+        elif shape == "triangle":
+            p1 = (self.img_size // 2 + dx, margin + dy)
+            p2 = (margin + dx, self.img_size - margin + dy)
+            p3 = (self.img_size - margin + dx, self.img_size - margin + dy)
+            draw.polygon([p1, p2, p3], fill="white")
+
     def __len__(self):
         return self.size
 
@@ -47,7 +65,10 @@ class GrayscaleShapesDataset(Dataset):
         # Create a grayscale ('L') image
         image = Image.new("L", (self.img_size, self.img_size), "black")
         draw = ImageDraw.Draw(image)
-        self._draw_shape(shape_name, draw)
+        if self.location_variation:
+            self._draw_shape_with_location_variation(shape_name, draw)
+        else:
+            self._draw_shape(shape_name, draw)
 
         return self.transform(image), shape_label
 
