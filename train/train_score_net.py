@@ -29,7 +29,7 @@ def score_loss(key, model, params, state, batch, t_0: float = 0.0, t_1: float = 
     score = sdlogqdx(t, x_t, labels=labels, rng=k_model)
 
     loss = jnp.mean(jnp.sum((epsilon + score) ** 2, axis=(1, 2, 3)))
-    return loss
+    return loss.mean(), next_sampler_state
 
 def get_step_fn(model, optimizer, loss_fn):
 
