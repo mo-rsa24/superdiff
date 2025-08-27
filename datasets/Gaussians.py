@@ -1,5 +1,8 @@
 from jax import random
 from jax import numpy as jnp
+from typing import Literal, Tuple
+
+Quadrant = Literal["upper_left", "upper_right", "lower_right", "lower_left"]
 
 class GaussianDataset:
     def __init__(self, num_keys: int = 3, num_clusters: int = 4, datapoints: int = 512, seed: int = 42, dimensions: int = 2, stretch: float = 0.5, scaling_factor: float = 3.0, normal: bool = True):
@@ -46,6 +49,66 @@ class GaussianDataset:
         x_1 = 3 * (x_1.astype(jnp.float32) - 0.5)
         x_1 += 4e-1 * random.normal(keys[1], shape=(datapoints, coordinates))
         return x_1
+
+    def sample_quadrant(self, quadrant: Quadrant, subsample: bool = True):
+        """
+        Sample a SINGLE Gaussian cluster at one of:
+        'upper_left', 'upper_right', 'lower_right', 'lower_left'.
+
+        If subsample=True, we return ~1/4 of the total datapoints (so
+        calling this 4 times yields ~self.datapoints total).
+        """
+        # fresh keys each call
+        keys = self._next_keys(3)
+
+        if subsample:
+            datapoints, coordinates = self.shape[0] // 4, self.shape[1]
+        else:
+            datapoints, coordinates = self.shape
+
+        # Choose per-dimension integer ranges for the target cell
+        if quadrant == "upper_left":
+            minval = jnp.array([0, 1])
+            maxval = jnp.array([1, 2])
+        elif quadrant == "upper_right":
+            minval = jnp.array([1, 1])
+            maxval = jnp.array([2, 2])
+        elif quadrant == "lower_right":
+            minval = jnp.array([1, 0])
+            maxval = jnp.array([2, 1])
+        elif quadrant == "lower_left":
+            minval = jnp.array([0, 0])
+            maxval = jnp.array([1, 1])
+        else:
+            raise ValueError(f"Unknown quadrant: {quadrant}")
+
+        x_1 = random.randint(keys[0], minval=minval, maxval=maxval, shape=(datapoints, coordinates))
+        # Keep your existing scaling and jitter so distributions match your current groups API
+        x_1 = 3 * (x_1.astype(jnp.float32) - 0.5)
+        x_1 += 4e-1 * random.normal(keys[1], shape=(datapoints, coordinates))
+        return x_1
+
+    def get_quadrants(self, subsample: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """
+        Convenience wrapper to fetch all four clusters, ordered as:
+        (upper_left, upper_right, lower_right, lower_left)
+
+        With subsample=True each cluster is ~1/4 of self.datapoints,
+        so concatenating all four recovers ~self.datapoints total samples.
+        """
+        ul = self.sample_quadrant("upper_left", subsample=subsample)
+        ur = self.sample_quadrant("upper_right", subsample=subsample)
+        lr = self.sample_quadrant("lower_right", subsample=subsample)
+        ll = self.sample_quadrant("lower_left", subsample=subsample)
+        return ul, ur, lr, ll
+
+    def _next_keys(self, n: int = 3):
+        """
+        Optional helper to advance PRNG for fresh randomness across calls.
+        Feel free to remove and revert to random.split(self.key, n) if you prefer fixed sequences.
+        """
+        self.key, *ks = random.split(self.key, n + 1)
+        return ks
 
     def get_groups(self, subsample: bool = True):
         up = self.sample_group(up=True, subsample=subsample)
