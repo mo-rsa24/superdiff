@@ -95,54 +95,54 @@ def to_device(iterable):
 # -------------------------
 # 6) The main training loop
 # -------------------------
-def train_model(key, model, dataset, *, batch_size=64, epochs=100, lr=2e-4,
-                t_0=0.0, t_1=1.0, model_name="Score-UNet"):
-    """
-    dataset can be (i) an iterator yielding {'image', 'label'} dicts, or
-    (ii) a tuple (images, labels) arrays.
-    """
-    print(f"--- Training {model_name} ---")
-    # Peek a batch to infer shapes for init
-    if isinstance(dataset, tuple):
-        images, labels = dataset
-        H, W, C = images.shape[1], images.shape[2], images.shape[3]
-        init_batch = {"image": images[:1], "label": None if labels is None else labels[:1]}
-        batch_iter_factory = lambda k: iterate_array_batches(images, labels, batch_size, k)
-    else:
-        # Assume iterable of dicts; grab one then rebuild iterator if needed
-        first = next(iter(dataset))
-        H, W, C = first["image"].shape[1], first["image"].shape[2], first["image"].shape[3]
-        init_batch = first
-        def batch_iter_factory(k):
-            # If dataset is a re-iterable (e.g., DataLoader), just return iter(dataset)
-            return iter(dataset)
-
-    # Init optimizer/state
-    init_key, key = random.split(key)
-    optimizer = optax.adam(lr)
-    # Model expects (t, x, [labels]) like the wrapper above
-    params = model.init(init_key,
-                        jnp.ones((1, 1, 1, 1), dtype=jnp.float32),   # t
-                        jnp.ones((1, H, W, C), dtype=jnp.float32),    # x
-                        init_batch.get("label", None)                 # labels if conditional
-                        )
-    state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=optimizer)
-
-    losses = []
-    for epoch in (pbar := trange(epochs, desc=f"{model_name}")):
-        epoch_losses = []
-        # fresh iterator each epoch (and fresh permutation for array-backed dataset)
-        key, epoch_key = random.split(key)
-        batch_iter = batch_iter_factory(epoch_key)
-
-        for batch in batch_iter:
-            key, step_key = random.split(key)
-            state, loss = train_step(state, batch, step_key, model, t_0=t_0, t_1=t_1)
-            epoch_losses.append(loss)
-
-        avg = float(np.mean(jax.device_get(jnp.array(epoch_losses))))
-        losses.append(avg)
-        pbar.set_postfix_str(f"loss={avg:.4f}")
-
-    print(f"Training complete for {model_name}.")
-    return state, losses
+# def train_model(key, model, dataset, *, batch_size=64, epochs=100, lr=2e-4,
+#                 t_0=0.0, t_1=1.0, model_name="Score-UNet"):
+#     """
+#     dataset can be (i) an iterator yielding {'image', 'label'} dicts, or
+#     (ii) a tuple (images, labels) arrays.
+#     """
+#     print(f"--- Training {model_name} ---")
+#     # Peek a batch to infer shapes for init
+#     if isinstance(dataset, tuple):
+#         images, labels = dataset
+#         H, W, C = images.shape[1], images.shape[2], images.shape[3]
+#         init_batch = {"image": images[:1], "label": None if labels is None else labels[:1]}
+#         batch_iter_factory = lambda k: iterate_array_batches(images, labels, batch_size, k)
+#     else:
+#         # Assume iterable of dicts; grab one then rebuild iterator if needed
+#         first = next(iter(dataset))
+#         H, W, C = first["image"].shape[1], first["image"].shape[2], first["image"].shape[3]
+#         init_batch = first
+#         def batch_iter_factory(k):
+#             # If dataset is a re-iterable (e.g., DataLoader), just return iter(dataset)
+#             return iter(dataset)
+#
+#     # Init optimizer/state
+#     init_key, key = random.split(key)
+#     optimizer = optax.adam(lr)
+#     # Model expects (t, x, [labels]) like the wrapper above
+#     params = model.init(init_key,
+#                         jnp.ones((1, 1, 1, 1), dtype=jnp.float32),   # t
+#                         jnp.ones((1, H, W, C), dtype=jnp.float32),    # x
+#                         init_batch.get("label", None)                 # labels if conditional
+#                         )
+#     state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=optimizer)
+#
+#     losses = []
+#     for epoch in (pbar := trange(epochs, desc=f"{model_name}")):
+#         epoch_losses = []
+#         # fresh iterator each epoch (and fresh permutation for array-backed dataset)
+#         key, epoch_key = random.split(key)
+#         batch_iter = batch_iter_factory(epoch_key)
+#
+#         for batch in batch_iter:
+#             key, step_key = random.split(key)
+#             state, loss = train_step(state, batch, step_key, model, t_0=t_0, t_1=t_1)
+#             epoch_losses.append(loss)
+#
+#         avg = float(np.mean(jax.device_get(jnp.array(epoch_losses))))
+#         losses.append(avg)
+#         pbar.set_postfix_str(f"loss={avg:.4f}")
+#
+#     print(f"Training complete for {model_name}.")
+#     return state, losses
