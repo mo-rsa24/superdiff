@@ -29,8 +29,10 @@ down_steps = forward_diffusion_over_time(gaussian_dataset.key, sample_data_down)
 down_forward = forward_diffusion_over_time(gaussian_dataset.key, sample_data_down)[-1]
 
 
-model_up = GaussianMLP(num_hid=512, num_out=2)
-model_down = GaussianMLP(num_hid=512, num_out=2)
+model_upper_left = GaussianMLP(num_hid=512, num_out=2)
+model_upper_right = GaussianMLP(num_hid=512, num_out=2)
+model_lower_left = GaussianMLP(num_hid=512, num_out=2)
+model_lower_right = GaussianMLP(num_hid=512, num_out=2)
 
 up_loss, up_state = train_group(model_up, sample_data_up, up_forward)
 up_trajectory = reverse_sde(up_state, sample_data_up, key)
