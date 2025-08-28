@@ -91,27 +91,30 @@ def visualize_forward_and_reverse_diffusion(sample_data, generated_data, figsize
         plt.ylim(lim)
         plt.grid()
         if i == 0:
-            plt.legend(fontsize=15)
+            plt.legend(
+                fontsize=12,
+                loc="upper center",  # place it at the top center
+                bbox_to_anchor=(1.1, 1.05)  # move it outside the axes
+            )
     plt.show()
 
 def visualize_forward_and_reverse_diffusion_on_all_latents(samples, generated_data, labels, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward & Reverse Diffusion Over All Latents"):
     timesteps: np.ndarray = np.linspace(0.0, 1.0, np.array(len(samples[0])))
     gen_num_timesteps = generated_data[0].shape[1]-1
-    plt.figure(figsize=figsize)
+    fig, axes = plt.subplots(1, len(timesteps), figsize=figsize, sharex=True, sharey=True)
     for (i, timestep) in enumerate(timesteps):
-        plt.subplot(1, len(timesteps), i+1)
+        ax = axes[i]
         reverse_index = len(timesteps) - 1 - i
         t = timesteps[reverse_index]
         for j, (label, sub_samples, gen_data) in enumerate(zip(labels, samples, generated_data)):
-            plt.scatter(sub_samples[reverse_index][:, 0], sub_samples[reverse_index][:, 1], label=label, s=10, )
-            plt.scatter(gen_data[:, int(gen_num_timesteps*(timesteps[i])),0], gen_data[:, int(gen_num_timesteps*(timesteps[i])),1], label=f'{label} Gen Data',s=10, alpha=0.5)
-        plt.title(f't={t}')
-        plt.xlim(lim)
-        plt.ylim(lim)
-        plt.grid()
-        if i == 0:
-            plt.legend(fontsize=15)
-    plt.suptitle(title, fontsize=20)
+            ax.scatter(sub_samples[reverse_index][:, 0], sub_samples[reverse_index][:, 1], label=label, s=10, )
+            ax.scatter(gen_data[:, int(gen_num_timesteps*(timesteps[i])),0], gen_data[:, int(gen_num_timesteps*(timesteps[i])),1], label=f'{label} Gen Data',s=10, alpha=0.5)
+        ax.title(f't={t}')
+        ax.xlim(lim)
+        ax.ylim(lim)
+        ax.grid()
+    fig.suptitle(title, fontsize=20)
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])
     plt.show()
 
 
@@ -153,7 +156,11 @@ def visualize_composition(superposed_trajectory, sample_data_steps_1, sample_dat
         plt.ylim(-3, 3)
         plt.grid()
         if i == 0:
-            plt.legend(fontsize=15)
+            plt.legend(
+                fontsize=12,
+                loc="upper center",  # place it at the top center
+                bbox_to_anchor=(1.1, 1.05)  # move it outside the axes
+            )
     plt.show()
 
 def visualize_compositions(superposed_trajectory, samples, labels, figsize: Tuple[int,int] =(23,5), num_axis: int = 6, lim=(-3,3), title: str = "Sampling From An Iso-Surface Of All Latents"):
