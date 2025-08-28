@@ -47,7 +47,7 @@ def compose_and_estimate_log_likelihood_along_superposed_trajectory(state_a, sta
     trajectory_field = jnp.zeros((datapoints, num_timesteps, coordinates))  # Storage for whole trajectory
     pure_noise = random.normal(subkey, shape=(datapoints, coordinates))
     trajectory_field = trajectory_field.at[:, 0, :].set(pure_noise)
-    trajectory, log_likelihood_model_a, log_likelihood_model_b = ito_dynamic_estimator_solver(key, t, state_a, state_b, trajectory_field, dt=dt, num_timesteps=num_timesteps,  shape=shape, kappa=kappa)
+    trajectory, log_likelihood_model_a, log_likelihood_model_b = ito_dynamic_estimator_solver(key, t, state_a, state_b, trajectory_field, dt=dt, num_timesteps=num_timesteps,  shape=shape, select_kappa=kappa)
     return trajectory, log_likelihood_model_a, log_likelihood_model_b
 
 def ito_dynamic_estimator_solver(key, t, state_a, state_b, trajectory, dt: float = 1e-2, num_timesteps: int=100,  shape: Tuple[int,int] = (512, 2), select_kappa: SELECT_KAPPA = "iso_surface"):
