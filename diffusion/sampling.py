@@ -76,7 +76,7 @@ def score_fn(score_model, params, x, t):
     return score_model.apply(params, x, t)
 
 
-pmap_score_fn = jax.pmap(score_fn, static_broadcasted_argnums=(0, 1))
+pmap_score_fn = jax.pmap(score_fn, in_axes=(None, None, 0, 0))
 
 
 def Euler_Maruyama_sampler(rng,

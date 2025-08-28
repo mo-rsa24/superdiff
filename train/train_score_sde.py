@@ -38,13 +38,13 @@ def get_train_step_fn(model, marginal_prob_std):
 
     val_and_grad_fn = jax.value_and_grad(loss_fn, argnums=2)
 
-    def step_fn(rng, x, optimizer):
-        params = optimizer.target
+    def step_fn(rng, x, state):
+        params = state.params
         loss, grad = val_and_grad_fn(rng, model, params, x, marginal_prob_std)
         mean_grad = jax.lax.pmean(grad, axis_name='device')
         mean_loss = jax.lax.pmean(loss, axis_name='device')
-        new_optimizer = optimizer.apply_gradient(mean_grad)
+        new_state = state.apply_gradients(grads=mean_grad)
 
-        return mean_loss, new_optimizer
+        return mean_loss, new_state
 
     return jax.pmap(step_fn, axis_name='device')

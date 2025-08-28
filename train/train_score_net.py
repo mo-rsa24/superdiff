@@ -1,7 +1,5 @@
-from tqdm import trange
 import math
 import optax
-from flax.training import train_state
 from diffusion.equations import *
 from jax import random
 

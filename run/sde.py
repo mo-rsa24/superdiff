@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
-import flax
 import optax
+from flax.training.train_state import TrainState
 from flax.serialization import to_bytes, from_bytes
 import tensorflow as tf
 from torch.utils.data import DataLoader
@@ -27,7 +27,8 @@ params = score_model.init({'params': rng}, fake_input, fake_time)
 
 dataset = MNIST('.', train=True, transform=transforms.ToTensor(), download=True)
 data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-optimizer = flax.optim.Adam(learning_rate=lr).create(params)
+tx = optax.adam(lr)
+state = TrainState.create(apply_fn=score_model.apply, params=params, tx=tx)
 train_step_fn = get_train_step_fn(score_model, marginal_prob_std_fn)
 tqdm_epoch = tqdm.trange(n_epochs)
 
@@ -42,49 +43,50 @@ for epoch in tqdm_epoch:
     x = x.permute(0, 2, 3, 1).numpy().reshape(data_shape)
     rng, *step_rng = jax.random.split(rng, jax.local_device_count() + 1)
     step_rng = jnp.asarray(step_rng)
-    loss, optimizer = train_step_fn(step_rng, x, optimizer)
-    loss = flax.jax_utils.unreplicate(loss)
-    avg_loss += loss.item() * x.shape[0]
+    loss, optimizer = train_step_fn(step_rng, x, state)
+    loss = jax.tree_util.tree_map(lambda v: v, loss)
+    mean_loss = tf.nest.flatten(loss)[0]  # per-device scalar -> host
+    avg_loss += float(mean_loss) * x.shape[0]
     num_items += x.shape[0]
   # Print the averaged training loss so far.
   tqdm_epoch.set_description('Average Loss: {:5f}'.format(avg_loss / num_items))
-  # Update the checkpoint after each epoch of training.
+  host_state = jax.device_get(jax.tree_map(lambda x: x[0], state))
   with tf.io.gfile.GFile('ckpt.flax', 'wb') as fout:
-    fout.write(to_bytes(flax.jax_utils.unreplicate(optimizer)))
+      fout.write(to_bytes(host_state))
 
+# ------- Sampling -------
 from torchvision.utils import make_grid
+sample_batch_size = 64
+sampler = ode_sampler
 
-sample_batch_size = 64 #@param {'type':'integer'}
-sampler = ode_sampler #@param ['Euler_Maruyama_sampler', 'pc_sampler', 'ode_sampler'] {'type': 'raw'}
-
-## Load the pre-trained checkpoint from disk.
-score_model = ScoreNet(marginal_prob_std_fn)
+# Rebuild a state to load params
 fake_input = jnp.ones((sample_batch_size, 28, 28, 1))
-fake_time = jnp.ones((sample_batch_size, ))
+fake_time  = jnp.ones((sample_batch_size,))
 rng = jax.random.PRNGKey(0)
 params = score_model.init({'params': rng}, fake_input, fake_time)
-optimizer = flax.optim.Adam().create(params)
+
+sample_state = TrainState.create(apply_fn=score_model.apply, params=params, tx=optax.adam(lr))
+
 with tf.io.gfile.GFile('ckpt.flax', 'rb') as fin:
-  optimizer = from_bytes(optimizer, fin.read())
+    sample_state = from_bytes(sample_state, fin.read())
 
-## Generate samples using the specified sampler.
 rng, step_rng = jax.random.split(rng)
-samples = sampler(rng,
-                  score_model,
-                  optimizer.target,
-                  marginal_prob_std_fn,
-                  diffusion_coeff_fn,
-                  sample_batch_size)
+samples = sampler(
+    rng=step_rng,
+    score_model=score_model,
+    params=sample_state.params,
+    marginal_prob_std=marginal_prob_std_fn,
+    diffusion_coeff=diffusion_coeff_fn,
+    batch_size=sample_batch_size
+)
 
-## Sample visualization.
 samples = jnp.clip(samples, 0.0, 1.0)
 samples = jnp.transpose(samples.reshape((-1, 28, 28, 1)), (0, 3, 1, 2))
-
 
 import matplotlib.pyplot as plt
 sample_grid = make_grid(torch.tensor(np.asarray(samples)), nrow=int(np.sqrt(sample_batch_size)))
 
-plt.figure(figsize=(6,6))
+plt.figure(figsize=(6, 6))
 plt.axis('off')
 plt.imshow(sample_grid.permute(1, 2, 0).cpu(), vmin=0., vmax=1.)
 plt.show()
