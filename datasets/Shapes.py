@@ -12,29 +12,65 @@ class GrayscaleShapesDataset(Dataset):
     """
         Generates grayscale images of simple shapes.
     """
-    def __init__(self, shapes, size=10000, img_size=64, location_variation: bool = False):
+    def __init__(self, shapes, size=10000, img_size=64, location_variation: bool = False,
+                 size_variation: bool = False,
+                 size_range: Tuple[float, float] = (0.8, 1.2),
+                 ):
         self.size = size
         self.img_size = img_size
         self.shapes = shapes
         self.shape_to_idx = {s: i for i, s in enumerate(self.shapes)}
         self.location_variation = location_variation
+        self.size_variation = size_variation
+        self.size_range = size_range
         self.transform = Compose([
             ToTensor(),
             Lambda(lambda t: (t * 2) - 1)  # Scale to [-1, 1]
         ])
 
+    def _sample_bbox(self):
+        """Return (left, top, right, bottom) given size/location toggles."""
+        margin_base = self.img_size // 4
+        side_base = self.img_size - 2 * margin_base
+
+        # size jitter
+        if self.size_variation:
+            s = pyrandom.uniform(*self.size_range)
+        else:
+            s = 1.0
+        side = max(4, int(round(side_base * s)))
+
+        # location jitter (choose center so bbox stays inside bounds)
+        cx_nom, cy_nom = self.img_size // 2, self.img_size // 2
+        min_c = margin_base + side // 2
+        max_c = self.img_size - margin_base - side // 2
+
+        if self.location_variation and max_c >= min_c:
+            cx = pyrandom.randint(min_c, max_c)
+            cy = pyrandom.randint(min_c, max_c)
+        else:
+            cx, cy = cx_nom, cy_nom
+
+        left = cx - side // 2
+        top = cy - side // 2
+        right = left + side
+        bottom = top + side
+        return (left, top, right, bottom)
+
     def _draw_shape(self, shape, draw):
-        margin = self.img_size // 4
-        top_left = (margin, margin)
-        bottom_right = (self.img_size - margin, self.img_size - margin)
+        # unified drawer that uses bbox (supports both toggles)
+        bbox = self._sample_bbox()
         if shape == "circle":
-            draw.ellipse([top_left, bottom_right], fill="white")
+            draw.ellipse(bbox, fill="white")
         elif shape == "square":
-            draw.rectangle([top_left, bottom_right], fill="white")
+            draw.rectangle(bbox, fill="white")
         elif shape == "triangle":
-            p1 = (self.img_size // 2, margin)
-            p2 = (margin, self.img_size - margin)
-            p3 = (self.img_size - margin, self.img_size - margin)
+            # inscribe triangle in bbox
+            l, t, r, b = bbox
+            cx = (l + r) // 2
+            p1 = (cx, t)       # top mid
+            p2 = (l, b)        # bottom-left
+            p3 = (r, b)        # bottom-right
             draw.polygon([p1, p2, p3], fill="white")
 
     def _draw_shape_with_location_variation(self, shape, draw):
@@ -62,13 +98,9 @@ class GrayscaleShapesDataset(Dataset):
         shape_name = self.shapes[idx % len(self.shapes)]
         shape_label = torch.tensor(self.shape_to_idx[shape_name])
 
-        # Create a grayscale ('L') image
         image = Image.new("L", (self.img_size, self.img_size), "black")
         draw = ImageDraw.Draw(image)
-        if self.location_variation:
-            self._draw_shape_with_location_variation(shape_name, draw)
-        else:
-            self._draw_shape(shape_name, draw)
+        self._draw_shape(shape_name, draw)
 
         return self.transform(image), shape_label
 

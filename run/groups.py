@@ -61,21 +61,52 @@ ll_trajectory = reverse_sde(ll_state, ll, key)
 trajectories = [ul_trajectory, ur_trajectory, lr_trajectory, ll_trajectory]
 visualize_forward_and_reverse_diffusion_on_all_latents(samples, trajectories, labels, title="Forward & Reverse Diffusion Over Samples")
 
-
-trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ul_state, ur_state, key)
+# Simple Average
+trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ul_state, ur_state, key, kappa='simple_average')
 visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
 visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Upper Left & Upper Right")
 
+trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ll_state, lr_state, key, kappa='simple_average')
+visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
+visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Lower Left & Lower Right")
+
+trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ul_state, ll_state, key, kappa='simple_average')
+visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
+visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Upper Left & Lower Left")
+
+trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ur_state, lr_state, key, kappa='simple_average')
+visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
+visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Upper Right & Lower Right")
+
+# Proportional Average
+trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ul_state, ur_state, key, kappa='proportional_average')
+visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
+visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Upper Left & Upper Right")
+
+trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ll_state, lr_state, key, kappa='proportional_average')
+visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
+visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Lower Left & Lower Right")
+
+trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ul_state, ll_state, key, kappa='proportional_average')
+visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
+visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Upper Left & Lower Left")
+
+trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ur_state, lr_state, key, kappa='proportional_average')
+visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
+visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Upper Right & Lower Right")
+
+# Iso-Surface
+trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ul_state, ur_state, key)
+visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
+visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Upper Left & Upper Right")
 
 trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ll_state, lr_state, key)
 visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
 visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Lower Left & Lower Right")
 
-
 trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ul_state, ll_state, key)
 visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
 visualize_compositions(trajectory, samples, labels, title="Sampling From An Iso-Surface Of Upper Left & Lower Left")
-
 
 trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(ur_state, lr_state, key)
 visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)

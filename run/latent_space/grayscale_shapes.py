@@ -23,7 +23,7 @@ idx_to_shape = {i: s for i, s in shape_to_idx.items()}
 key = random.PRNGKey(Config.SEED)
 key, circle_key, square_key = random.split(key, 3)
 
-dataset = GrayscaleShapesDataset(shapes=shapes, location_variation=True)
+dataset = GrayscaleShapesDataset(shapes=shapes, location_variation=False, size_variation=True)
 batch_size = 512
 epochs = 1200
 dataloader = DataLoader(dataset, batch_size=len(dataset))
@@ -33,7 +33,7 @@ labels = labels.cpu().numpy()
 pca = GrayscalePCA(dataset)
 images_flat = images.reshape((images.shape[0], -1))
 latent_codes = jnp.array(pca.transform(images_flat))
-latent_codes = jnp.clip(latent_codes, -2.5, 2.5)
+# latent_codes = jnp.clip(latent_codes, -2.5, 2.5)
 
 circles = latent_codes[labels == shape_to_idx["circle"]]
 circle_samples = get_samples(circle_key, circles, 512)
