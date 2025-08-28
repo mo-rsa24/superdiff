@@ -29,6 +29,7 @@ dataset = MNIST('.', train=True, transform=transforms.ToTensor(), download=True)
 data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
 tx = optax.adam(lr)
 state = TrainState.create(apply_fn=score_model.apply, params=params, tx=tx)
+state = jax.device_put_replicated(state, jax.local_devices())
 train_step_fn = get_train_step_fn(score_model, marginal_prob_std_fn)
 tqdm_epoch = tqdm.trange(n_epochs)
 
@@ -43,10 +44,9 @@ for epoch in tqdm_epoch:
     x = x.permute(0, 2, 3, 1).numpy().reshape(data_shape)
     rng, *step_rng = jax.random.split(rng, jax.local_device_count() + 1)
     step_rng = jnp.asarray(step_rng)
-    loss, optimizer = train_step_fn(step_rng, x, state)
-    loss = jax.tree_util.tree_map(lambda v: v, loss)
-    mean_loss = tf.nest.flatten(loss)[0]  # per-device scalar -> host
-    avg_loss += float(mean_loss) * x.shape[0]
+    loss, state = train_step_fn(step_rng, x, state)
+    loss_host = jax.device_get(loss)[0]
+    avg_loss += float(loss_host) * x.shape[0]
     num_items += x.shape[0]
   # Print the averaged training loss so far.
   tqdm_epoch.set_description('Average Loss: {:5f}'.format(avg_loss / num_items))
