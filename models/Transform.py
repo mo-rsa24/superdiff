@@ -139,7 +139,7 @@ def get_latent_codes(method: str, dataset: GrayscaleShapesDataset, n_components:
 
     elif method == 'umap':
         print("Generating latent codes using UMAP...")
-        filename = f"umap_grayscale_{n_components}d.joblib"
+        filename = f"umap_grayscale.joblib"
         model_path = os.path.join(checkpoint_dir, filename)
         if os.path.exists(model_path):
             print(f"Loading pre-trained UMAP model from {model_path}")

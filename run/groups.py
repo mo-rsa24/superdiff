@@ -5,9 +5,7 @@ from diffusion.equations import *
 from config import Config
 from jax import random
 
-from utils.viz import visualize_forward_and_reverse_diffusion, \
-    visualize_log_likelihood_along_superposed_trajectory, \
-    visualize_forward_diffusion_process_of_samples_over_time, visualize_composition, \
+from utils.viz import visualize_log_likelihood_along_superposed_trajectory, \
     visualize_forward_diffusion_process_of_all_groups_over_time, visualize_forward_and_reverse_diffusion_on_all_latents, \
     visualize_compositions
 

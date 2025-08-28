@@ -35,24 +35,31 @@ def visualize_forward_diffusion_process_of_samples_over_time(key, sample_data, s
         plt.grid()
     plt.show()
 
-def visualize_forward_diffusion_process_groups_over_time(sample_1, sample_2, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3)):
+def visualize_forward_diffusion_process_groups_over_time(sample_1, sample_2, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward Diffusion Of All Latents Over Time"):
     """
     sample_1, sample_2: A list of samples that have been diffused over time
     Example:  [first_batch_of_samples_at_time_0, first_batch_of_samples_at_time_1, ..., first_batch_of_samples_at_time_6] each of size (512,2)
     Prerequisite: Call forward_diffusion_over_time()
     """
     timesteps: np.ndarray = np.linspace(0.0, 1.0, np.array(len(sample_1)))
-    plt.figure(figsize=figsize)
+    fig, axes = plt.subplots(1, len(timesteps), figsize=figsize, sharex=True, sharey=True)
     for (i, timestep) in enumerate(timesteps):
-        plt.subplot(1, len(timesteps), i+1)
-        plt.scatter(sample_1[i][:, 0], sample_1[i][:, 1], label='Sample 1', s=10, )
-        plt.scatter(sample_2[i][:, 0], sample_2[i][:, 1], label='Sample 2', s=10, )
-        plt.title(f't={timestep}')
-        plt.xlim(lim)
-        plt.ylim(lim)
-        plt.grid()
-        if i == 0:
-            plt.legend(fontsize=15)
+        ax = axes[i]
+        ax.scatter(sample_1[i][:, 0], sample_1[i][:, 1], label='Sample 1', s=10, )
+        ax.scatter(sample_2[i][:, 0], sample_2[i][:, 1], label='Sample 2', s=10, )
+        ax.set_title(f't={timestep}')
+        ax.set_xlim(lim)
+        ax.set_ylim(lim)
+        ax.grid()
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels,
+               loc='upper center',
+               bbox_to_anchor=(0.5, -0.05),  # below all subplots
+               ncol=3,  # arrange in 3 columns
+               fontsize=12)
+
+    fig.suptitle(title, fontsize=20)
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  # make room for suptitle + legend
     plt.show()
 
 def visualize_forward_diffusion_process_of_all_groups_over_time(samples, labels, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward Diffusion Over All Latents"):
@@ -62,40 +69,48 @@ def visualize_forward_diffusion_process_of_all_groups_over_time(samples, labels,
     Prerequisite: Call forward_diffusion_over_time()
     """
     timesteps: np.ndarray = np.linspace(0.0, 1.0, np.array(len(samples[0])))
-    plt.figure(figsize=figsize)
+    fig, axes = plt.subplots(1, len(timesteps), figsize=figsize, sharex=True, sharey=True)
     for (i, timestep) in enumerate(timesteps):
-        plt.subplot(1, len(timesteps), i+1)
+        ax = axes[i]
         for j, (shape_samples, label) in enumerate(zip(samples, labels)):
-            plt.scatter(shape_samples[i][:, 0], shape_samples[i][:, 1], label=f'{label}', s=10, )
-        plt.title(f't={timestep}')
-        plt.xlim(lim)
-        plt.ylim(lim)
-        plt.grid()
-        if i == 0:
-            plt.legend(fontsize=15)
-    plt.suptitle(title, fontsize=20)
-    plt.show()
+            ax.scatter(shape_samples[i][:, 0], shape_samples[i][:, 1], label=f'{label}', s=10, )
+        ax.set_title(f't={timestep}')
+        ax.set_xlim(lim)
+        ax.set_ylim(lim)
+        ax.grid()
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels,
+               loc='upper center',
+               bbox_to_anchor=(0.5, -0.05),  # below all subplots
+               ncol=3,  # arrange in 3 columns
+               fontsize=12)
 
-def visualize_forward_and_reverse_diffusion(sample_data, generated_data, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3)):
+    fig.suptitle(title, fontsize=20)
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  # make room for suptitle + legend
+    plt.show()
+def visualize_forward_and_reverse_diffusion(sample_data, generated_data, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward & Reverse Diffusion Over All Latents"):
     timesteps: np.ndarray = np.linspace(0.0, 1.0, np.array(len(sample_data)))
     gen_num_timesteps = generated_data.shape[1]-1
-    plt.figure(figsize=figsize)
+    fig, axes = plt.subplots(1, len(timesteps), figsize=figsize, sharex=True, sharey=True)
     for (i, timestep) in enumerate(timesteps):
-        plt.subplot(1, len(timesteps), i+1)
+        ax = axes[i]
         reverse_index = len(timesteps) - 1 - i
         t = timesteps[reverse_index]
-        plt.scatter(sample_data[reverse_index][:, 0], sample_data[reverse_index][:, 1], label='Noise Data', s=10, )
-        plt.scatter(generated_data[:, int(gen_num_timesteps*(timesteps[i])),0], generated_data[:, int(gen_num_timesteps*(timesteps[i])),1], label='Generated Data',s=10, alpha=0.5)
-        plt.title(f't={t}')
-        plt.xlim(lim)
-        plt.ylim(lim)
-        plt.grid()
-        if i == 0:
-            plt.legend(
-                fontsize=12,
-                loc="upper center",  # place it at the top center
-                bbox_to_anchor=(1.1, 1.05)  # move it outside the axes
-            )
+        ax.scatter(sample_data[reverse_index][:, 0], sample_data[reverse_index][:, 1], label='Noise Data', s=10, )
+        ax.scatter(generated_data[:, int(gen_num_timesteps*(timesteps[i])),0], generated_data[:, int(gen_num_timesteps*(timesteps[i])),1], label='Generated Data',s=10, alpha=0.5)
+        ax.set_title(f't={t}')
+        ax.set_xlim(lim)
+        ax.set_ylim(lim)
+        ax.grid()
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels,
+               loc='upper center',
+               bbox_to_anchor=(0.5, -0.05),  # below all subplots
+               ncol=3,  # arrange in 3 columns
+               fontsize=12)
+
+    fig.suptitle(title, fontsize=20)
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  # make room for suptitle + legend
     plt.show()
 
 def visualize_forward_and_reverse_diffusion_on_all_latents(samples, generated_data, labels, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward & Reverse Diffusion Over All Latents"):
@@ -109,12 +124,19 @@ def visualize_forward_and_reverse_diffusion_on_all_latents(samples, generated_da
         for j, (label, sub_samples, gen_data) in enumerate(zip(labels, samples, generated_data)):
             ax.scatter(sub_samples[reverse_index][:, 0], sub_samples[reverse_index][:, 1], label=label, s=10, )
             ax.scatter(gen_data[:, int(gen_num_timesteps*(timesteps[i])),0], gen_data[:, int(gen_num_timesteps*(timesteps[i])),1], label=f'{label} Gen Data',s=10, alpha=0.5)
-        ax.title(f't={t}')
-        ax.xlim(lim)
-        ax.ylim(lim)
+        ax.set_title(f't={t}')
+        ax.set_xlim(lim)
+        ax.set_ylim(lim)
         ax.grid()
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels,
+               loc='upper center',
+               bbox_to_anchor=(0.5, -0.05),  # below all subplots
+               ncol=3,  # arrange in 3 columns
+               fontsize=12)
+
     fig.suptitle(title, fontsize=20)
-    plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  # make room for suptitle + legend
     plt.show()
 
 
@@ -140,45 +162,55 @@ def visualize_log_likelihood_along_superposed_trajectory(log_likelihood_a, log_l
     plt.grid()
     plt.show()
 
-def visualize_composition(superposed_trajectory, sample_data_steps_1, sample_data_steps_2, sample_data_steps_1_label: str = "Up Noise", sample_data_steps_2_label: str = "Down Noise", figsize: Tuple[int,int] =(23,5), num_axis: int = 6):
+def visualize_composition(superposed_trajectory, sample_data_steps_1, sample_data_steps_2, sample_data_steps_1_label: str = "Up Noise", sample_data_steps_2_label: str = "Down Noise", figsize: Tuple[int,int] =(23,5), lim=(-3, 3), num_axis: int = 6, title="Composition Of Pre-Trained Diffusion Models"):
     timesteps: np.ndarray = np.linspace(0.0, 1.0, np.array(len(sample_data_steps_1)))
     gen_num_timesteps = superposed_trajectory.shape[1] - 1
-    plt.figure(figsize=figsize)
+    fig, axes = plt.subplots(1, len(timesteps), figsize=figsize, sharex=True, sharey=True)
     for i in range(num_axis):
-        plt.subplot(1, num_axis, i + 1)  # 1 row, 6 columns
+        ax = axes[i]
         reverse_index = len(timesteps) - 1 - i
         t = timesteps[reverse_index]
-        plt.scatter(sample_data_steps_1[reverse_index][:, 0], sample_data_steps_1[reverse_index][:, 1], label=sample_data_steps_1_label, s=10, )
-        plt.scatter(sample_data_steps_2[reverse_index][:, 0], sample_data_steps_2[reverse_index][:, 1], label=sample_data_steps_2_label, s=10, )
-        plt.scatter(superposed_trajectory[:, int(gen_num_timesteps * (timesteps[i])), 0], superposed_trajectory[:, int(gen_num_timesteps* (timesteps[i])), 1], label='Composition')
-        plt.title(f't={t}')
-        plt.xlim(-3, 3)
-        plt.ylim(-3, 3)
-        plt.grid()
-        if i == 0:
-            plt.legend(
-                fontsize=12,
-                loc="upper center",  # place it at the top center
-                bbox_to_anchor=(1.1, 1.05)  # move it outside the axes
-            )
+        ax.scatter(sample_data_steps_1[reverse_index][:, 0], sample_data_steps_1[reverse_index][:, 1], label=sample_data_steps_1_label, s=10, )
+        ax.scatter(sample_data_steps_2[reverse_index][:, 0], sample_data_steps_2[reverse_index][:, 1], label=sample_data_steps_2_label, s=10, )
+        ax.scatter(superposed_trajectory[:, int(gen_num_timesteps * (timesteps[i])), 0], superposed_trajectory[:, int(gen_num_timesteps* (timesteps[i])), 1], label='Composition')
+        ax.set_title(f't={t}')
+        ax.set_xlim(lim)
+        ax.set_ylim(lim)
+        ax.grid()
+
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels,
+               loc='upper center',
+               bbox_to_anchor=(0.5, -0.05),  # below all subplots
+               ncol=3,  # arrange in 3 columns
+               fontsize=12)
+
+    fig.suptitle(title, fontsize=20)
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  # make room for suptitle + legend
     plt.show()
 
 def visualize_compositions(superposed_trajectory, samples, labels, figsize: Tuple[int,int] =(23,5), num_axis: int = 6, lim=(-3,3), title: str = "Sampling From An Iso-Surface Of All Latents"):
     timesteps: np.ndarray = np.linspace(0.0, 1.0, np.array(len(samples[0])))
     gen_num_timesteps = superposed_trajectory.shape[1] - 1
-    plt.figure(figsize=figsize)
+    fig, axes = plt.subplots(1, len(timesteps), figsize=figsize, sharex=True, sharey=True)
     for i in range(num_axis):
-        plt.subplot(1, num_axis, i + 1)  # 1 row, 6 columns
+        ax = axes[i]
         reverse_index = len(timesteps) - 1 - i
         t = timesteps[reverse_index]
         for j, (shape_samples, label) in enumerate(zip(samples, labels)):
-            plt.scatter(shape_samples[reverse_index][:, 0], shape_samples[reverse_index][:, 1], label=label, s=10, )
-        plt.scatter(superposed_trajectory[:, int(gen_num_timesteps * (timesteps[i])), 0], superposed_trajectory[:, int(gen_num_timesteps* (timesteps[i])), 1], label='Composition')
-        plt.title(f't={t}')
-        plt.xlim(lim)
-        plt.ylim(lim)
-        plt.grid()
-        if i == 0:
-            plt.legend(fontsize=15)
-    plt.suptitle(title, fontsize=20)
+            ax.scatter(shape_samples[reverse_index][:, 0], shape_samples[reverse_index][:, 1], label=label, s=10, )
+        ax.scatter(superposed_trajectory[:, int(gen_num_timesteps * (timesteps[i])), 0], superposed_trajectory[:, int(gen_num_timesteps* (timesteps[i])), 1], label='Composition')
+        ax.set_title(f't={t}')
+        ax.set_xlim(lim)
+        ax.set_ylim(lim)
+        ax.grid()
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels,
+               loc='upper center',
+               bbox_to_anchor=(0.5, -0.05),  # below all subplots
+               ncol=3,  # arrange in 3 columns
+               fontsize=12)
+
+    fig.suptitle(title, fontsize=20)
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  # make room for suptitle + legend
     plt.show()
