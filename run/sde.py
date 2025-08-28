@@ -27,7 +27,7 @@ params = score_model.init({'params': rng}, fake_input, fake_time)
 
 dataset = MNIST('.', train=True, transform=transforms.ToTensor(), download=True)
 data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-optimizer = optax.adam(learning_rate=lr)
+optimizer = flax.optim.Adam(learning_rate=lr).create(params)
 train_step_fn = get_train_step_fn(score_model, marginal_prob_std_fn)
 tqdm_epoch = tqdm.trange(n_epochs)
 
