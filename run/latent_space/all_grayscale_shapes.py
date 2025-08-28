@@ -1,7 +1,7 @@
 from torch.utils.data import DataLoader
 from datasets.Shapes import GrayscaleShapesDataset, get_batches, get_samples
 from diffusion.sampling import reverse_sde, compose_and_estimate_log_likelihood_along_superposed_trajectory
-from models.PCA import GrayscalePCA
+from models.Transform import GrayscalePCA
 from models.MLP import GrayscaleLatentMLP
 from diffusion.equations import *
 from config import Config

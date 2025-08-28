@@ -1,7 +1,7 @@
 from torch.utils.data import DataLoader
 from datasets.Shapes import GrayscaleShapesDataset, get_batches, get_samples
 from diffusion.sampling import reverse_sde, compose_and_estimate_log_likelihood_along_superposed_trajectory
-from models.PCA import GrayscalePCA
+from models.Transform import GrayscalePCA, get_latent_codes
 from models.MLP import GrayscaleLatentMLP
 from diffusion.equations import *
 from config import Config
@@ -31,6 +31,8 @@ images, labels = next(iter(dataloader))
 labels = labels.cpu().numpy()
 
 pca = GrayscalePCA(dataset)
+pca_embedding, pca_labels = get_latent_codes('pca', dataset, n_components=2)
+print(f"Shape of PCA embedding: {pca_embedding.shape}\n")
 images_flat = images.reshape((images.shape[0], -1))
 latent_codes = jnp.array(pca.transform(images_flat))
 # latent_codes = jnp.clip(latent_codes, -2.5, 2.5)
