@@ -25,7 +25,7 @@ key, circle_key, square_key, triangle_key = random.split(key, 4)
 
 dataset = GrayscaleShapesDataset(shapes=shapes)
 batch_size = 512
-epochs = 1500
+epochs = 1000
 dataloader = DataLoader(dataset, batch_size=len(dataset))
 images, labels = next(iter(dataloader))
 labels = labels.cpu().numpy()

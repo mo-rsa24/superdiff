@@ -31,7 +31,7 @@ def train_step(state, sample_data, key):
 def train_mlp(key, state, sample_data):
     key, loc_key = random.split(key)
 
-    num_iterations = 20_000
+    num_iterations = 10
     loss_plot = np.zeros(num_iterations)
     key, loop_key = random.split(key)
 
