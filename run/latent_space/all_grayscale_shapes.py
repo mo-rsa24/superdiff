@@ -25,10 +25,10 @@ key, circle_key, square_key, triangle_key = random.split(key, 4)
 
 dataset = GrayscaleShapesDataset(shapes=shapes)
 batch_size = 512
-epochs = 300
+epochs = 600
 dataloader = DataLoader(dataset, batch_size=len(dataset))
-method = "umap"
-vae_training_params = {'epochs': 25, 'beta': 4.0}
+method = "vae"
+vae_training_params = {'epochs': 600, 'beta': 4.0}
 latent_codes_np, labels_np = get_latent_codes(
     method=method,
     dataset=dataset,
@@ -55,35 +55,35 @@ square_forward_steps = forward_diffusion_over_time(key, square_samples, timestep
 triangle_forward_steps = forward_diffusion_over_time(key, triangle_samples, timesteps)
 steps = [circle_forward_steps, square_forward_steps, triangle_forward_steps]
 
-visualize_forward_diffusion_process_of_all_groups_over_time(steps, shapes, lim=(-30,30), title="Forward Diffusion Over All Shapes")
+visualize_forward_diffusion_process_of_all_groups_over_time(steps, shapes, lim=(-5,5), title="Forward Diffusion Over All Shapes")
 
 circle_model = GrayscaleLatentMLP(num_hid = 512, num_out = 2)
 circle_state, circle_loss = train_expert(circle_key, circle_model, circles, epochs=epochs, model_name="Circle Model")
-circle_trajectory = reverse_sde(circle_state, circle_samples, circle_key, dt=1e-3)
+circle_trajectory = reverse_sde(circle_state, circle_samples, circle_key, dt=1e-4)
 
 square_model = GrayscaleLatentMLP(num_hid = 512, num_out = 2)
 square_state, square_loss  = train_expert(square_key, square_model, squares, epochs=epochs, model_name="Square Model")
-square_trajectory = reverse_sde(square_state, square_samples, square_key, dt=1e-3)
+square_trajectory = reverse_sde(square_state, square_samples, square_key, dt=1e-4)
 
 triangle_model = GrayscaleLatentMLP(num_hid = 512, num_out = 2)
 triangle_state, triangle_loss  = train_expert(triangle_key, triangle_model, triangles, epochs=epochs, model_name="Triangle Model")
-triangle_trajectory = reverse_sde(triangle_state, triangle_samples, triangle_key, dt=1e-3)
+triangle_trajectory = reverse_sde(triangle_state, triangle_samples, triangle_key, dt=1e-4)
 
 trajectories = [circle_trajectory, square_trajectory, triangle_trajectory]
-visualize_forward_and_reverse_diffusion_on_all_latents(steps, trajectories, shapes, lim=(-30,30), title="Forward & Reverse Diffusion Over All Shapes")
+visualize_forward_and_reverse_diffusion_on_all_latents(steps, trajectories, shapes, lim=(-5,5), title="Forward & Reverse Diffusion Over All Shapes")
 
 # Between Squares And Circles
-trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(circle_state, square_state, key, dt=1e-3)
+trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(circle_state, square_state, key, dt=1e-4)
 visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
-visualize_compositions(trajectory, steps, shapes, lim=(-30,30), title="Sampling From An Iso-Surface Of Squares & Circles")
+visualize_compositions(trajectory, steps, shapes, lim=(-5,5), title="Sampling From An Iso-Surface Of Squares & Circles")
 
 # Between Triangles And Circles
-trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(triangle_state, circle_state, key, dt=1e-3)
+trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(triangle_state, circle_state, key, dt=1e-4)
 visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
-visualize_compositions(trajectory, steps, shapes, lim=(-30,30), title="Sampling From An Iso-Surface Of Triangles & Circles")
+visualize_compositions(trajectory, steps, shapes, lim=(-5,5), title="Sampling From An Iso-Surface Of Triangles & Circles")
 
 
 # Between Triangles And Squares
-trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(triangle_state, square_state, key, dt=1e-3)
+trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(triangle_state, square_state, key, dt=1e-4)
 visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
-visualize_compositions(trajectory, steps, shapes, lim=(-30,30), title="Sampling From An Iso-Surface Of Triangles & Squares")
+visualize_compositions(trajectory, steps, shapes, lim=(-5,5), title="Sampling From An Iso-Surface Of Triangles & Squares")

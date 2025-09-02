@@ -68,4 +68,4 @@ visualize_forward_and_reverse_diffusion(square_forward_steps, square_trajectory,
 
 trajectory, log_likelihood_model_a, log_likelihood_model_b = compose_and_estimate_log_likelihood_along_superposed_trajectory(circle_state, square_state, key, dt=1e-3)
 visualize_log_likelihood_along_superposed_trajectory(log_likelihood_model_a, log_likelihood_model_b)
-visualize_composition(trajectory, circle_forward_steps, square_forward_steps)
+visualize_composition(trajectory, circle_forward_steps, square_forward_steps,  lim=(-30, 30))

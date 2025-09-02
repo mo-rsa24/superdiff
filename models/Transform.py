@@ -59,42 +59,19 @@ def GrayscaleUMAP(dataset: GrayscaleShapesDataset, n_components: int = 2, filena
     return reducer
 
 
-def GrayscaleTSNE(dataset: GrayscaleShapesDataset, n_components: int = 2, filename: str = "tsne_grayscale.joblib",
-                  checkpoint_dir: str = "./checkpoints"):
-    """
-    Applies t-SNE to reduce the dimensionality of the GrayscaleShapesDataset.
 
-    Args:
-        dataset (GrayscaleShapesDataset): The input dataset.
-        n_components (int, optional): The number of dimensions to reduce to. Defaults to 2.
-        filename (str, optional): The filename to save the t-SNE model. Defaults to "tsne_grayscale.joblib".
-        checkpoint_dir (str, optional): The directory to save the model. Defaults to "./checkpoints".
-
-    Returns:
-        sklearn.manifold.TSNE: The trained t-SNE model.
-    """
+def GrayscaleTSNE(dataset: GrayscaleShapesDataset, n_components: int = 2, filename: str = "tsne_grayscale.joblib", checkpoint_dir: str = "./checkpoints"):
+    """Applies t-SNE and saves the model."""
     os.makedirs(checkpoint_dir, exist_ok=True)
     tsne_model_path = os.path.join(checkpoint_dir, filename)
-
-    # Load the entire dataset
     dataloader = DataLoader(dataset, batch_size=len(dataset))
     images, _ = next(iter(dataloader))
-
-    # Flatten images for t-SNE
     images_flat = images.view(images.size(0), -1).numpy()
-
-    # Initialize and fit t-SNE
-    tsne = TSNE(n_components=n_components, random_state=42, perplexity=30, n_iter=1000)
-    embedding = tsne.fit_transform(images_flat)
-
-    # t-SNE in scikit-learn doesn't have a separate 'fit' and 'transform' for new data,
-    # but we can save the fitted object which contains the embedding.
-    # For applying to new data, you would typically re-fit.
-    # Here we save the entire object.
+    # Corrected: Changed 'n_iter' to 'max_iter' for compatibility with newer scikit-learn versions.
+    tsne = TSNE(n_components=n_components, random_state=42, perplexity=30, max_iter=1000)
+    tsne.fit_transform(images_flat)
     joblib.dump(tsne, tsne_model_path)
     print(f"Grayscale t-SNE model saved to {tsne_model_path}")
-    print(f"The embedding is stored in the 'embedding_' attribute of the saved model.")
-
     return tsne
 
 def get_vae_embedding(model, dataset):

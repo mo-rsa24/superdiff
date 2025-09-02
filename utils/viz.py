@@ -35,7 +35,7 @@ def visualize_forward_diffusion_process_of_samples_over_time(key, sample_data, s
         plt.grid()
     plt.show()
 
-def visualize_forward_diffusion_process_groups_over_time(sample_1, sample_2, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward Diffusion Of All Latents Over Time"):
+def visualize_forward_diffusion_process_groups_over_time(sample_1, sample_2, label_1: str = "Circle", label_2: str = "Square", figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward Diffusion Of All Latents Over Time", savepath: str = None):
     """
     sample_1, sample_2: A list of samples that have been diffused over time
     Example:  [first_batch_of_samples_at_time_0, first_batch_of_samples_at_time_1, ..., first_batch_of_samples_at_time_6] each of size (512,2)
@@ -45,24 +45,28 @@ def visualize_forward_diffusion_process_groups_over_time(sample_1, sample_2, fig
     fig, axes = plt.subplots(1, len(timesteps), figsize=figsize, sharex=True, sharey=True)
     for (i, timestep) in enumerate(timesteps):
         ax = axes[i]
-        ax.scatter(sample_1[i][:, 0], sample_1[i][:, 1], label='Sample 1', s=10, )
-        ax.scatter(sample_2[i][:, 0], sample_2[i][:, 1], label='Sample 2', s=10, )
+        ax.scatter(sample_1[i][:, 0], sample_1[i][:, 1], label=label_1, s=10, )
+        ax.scatter(sample_2[i][:, 0], sample_2[i][:, 1], label=label_2, s=10, )
         ax.set_title(f't={timestep}')
         ax.set_xlim(lim)
         ax.set_ylim(lim)
         ax.grid()
-    handles, legend_labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, legend_labels,
-               loc='upper center',
-               bbox_to_anchor=(0.5, -0.05),  # below all subplots
-               ncol=3,  # arrange in 3 columns
-               fontsize=12)
+    handles, labels_ = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels_,
+               loc="lower center",  # inside the figure, bottom center
+               bbox_to_anchor=(0.5, 0.0),
+               ncol=2, fontsize=12, frameon=True)
 
     fig.suptitle(title, fontsize=20)
-    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  # make room for suptitle + legend
+
+    # Reserve enough bottom space for the legend (adjust as needed)
+    fig.subplots_adjust(bottom=0.18, top=0.85)
+
+    if savepath:
+        fig.savefig(savepath, dpi=300, bbox_inches="tight")
     plt.show()
 
-def visualize_forward_diffusion_process_of_all_groups_over_time(samples, labels, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward Diffusion Over All Latents"):
+def visualize_forward_diffusion_process_of_all_groups_over_time(samples, labels, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward Diffusion Over All Latents", savepath: str = None):
     """
     sample_1, sample_2: A list of samples that have been diffused over time
     Example:  [first_batch_of_samples_at_time_0, first_batch_of_samples_at_time_1, ..., first_batch_of_samples_at_time_6] each of size (512,2)
@@ -78,17 +82,22 @@ def visualize_forward_diffusion_process_of_all_groups_over_time(samples, labels,
         ax.set_xlim(lim)
         ax.set_ylim(lim)
         ax.grid()
-    handles, legend_labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, legend_labels,
-               loc='upper center',
-               bbox_to_anchor=(0.5, -0.05),  # below all subplots
-               ncol=3,  # arrange in 3 columns
-               fontsize=12)
+    handles, labels_ = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels_,
+               loc="lower center",  # inside the figure, bottom center
+               bbox_to_anchor=(0.5, 0.0),
+               ncol=2, fontsize=12, frameon=True)
 
     fig.suptitle(title, fontsize=20)
-    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  # make room for suptitle + legend
+
+    # Reserve enough bottom space for the legend (adjust as needed)
+    fig.subplots_adjust(bottom=0.18, top=0.85)
+
+    if savepath:
+        fig.savefig(savepath, dpi=300, bbox_inches="tight")
     plt.show()
-def visualize_forward_and_reverse_diffusion(sample_data, generated_data, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward & Reverse Diffusion Over All Latents"):
+
+def visualize_forward_and_reverse_diffusion(sample_data, generated_data, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward & Reverse Diffusion Over All Latents", savepath: str = None):
     timesteps: np.ndarray = np.linspace(0.0, 1.0, np.array(len(sample_data)))
     gen_num_timesteps = generated_data.shape[1]-1
     fig, axes = plt.subplots(1, len(timesteps), figsize=figsize, sharex=True, sharey=True)
@@ -102,18 +111,22 @@ def visualize_forward_and_reverse_diffusion(sample_data, generated_data, figsize
         ax.set_xlim(lim)
         ax.set_ylim(lim)
         ax.grid()
-    handles, legend_labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, legend_labels,
-               loc='upper center',
-               bbox_to_anchor=(0.5, -0.05),  # below all subplots
-               ncol=3,  # arrange in 3 columns
-               fontsize=12)
+    handles, labels_ = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels_,
+               loc="lower center",  # inside the figure, bottom center
+               bbox_to_anchor=(0.5, 0.0),
+               ncol=2, fontsize=12, frameon=True)
 
     fig.suptitle(title, fontsize=20)
-    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  # make room for suptitle + legend
+
+    # Reserve enough bottom space for the legend (adjust as needed)
+    fig.subplots_adjust(bottom=0.18, top=0.85)
+
+    if savepath:
+        fig.savefig(savepath, dpi=300, bbox_inches="tight")
     plt.show()
 
-def visualize_forward_and_reverse_diffusion_on_all_latents(samples, generated_data, labels, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward & Reverse Diffusion Over All Latents"):
+def visualize_forward_and_reverse_diffusion_on_all_latents(samples, generated_data, labels, figsize: Tuple[int,int] =(23, 5), lim=(-3, 3), title: str = "Forward & Reverse Diffusion Over All Latents", savepath: str = None):
     timesteps: np.ndarray = np.linspace(0.0, 1.0, np.array(len(samples[0])))
     gen_num_timesteps = generated_data[0].shape[1]-1
     fig, axes = plt.subplots(1, len(timesteps), figsize=figsize, sharex=True, sharey=True)
@@ -128,15 +141,19 @@ def visualize_forward_and_reverse_diffusion_on_all_latents(samples, generated_da
         ax.set_xlim(lim)
         ax.set_ylim(lim)
         ax.grid()
-    handles, legend_labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, legend_labels,
-               loc='upper center',
-               bbox_to_anchor=(0.5, -0.05),  # below all subplots
-               ncol=3,  # arrange in 3 columns
-               fontsize=12)
+    handles, labels_ = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels_,
+               loc="lower center",  # inside the figure, bottom center
+               bbox_to_anchor=(0.5, 0.0),
+               ncol=2, fontsize=12, frameon=True)
 
     fig.suptitle(title, fontsize=20)
-    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  # make room for suptitle + legend
+
+    # Reserve enough bottom space for the legend (adjust as needed)
+    fig.subplots_adjust(bottom=0.18, top=0.85)
+
+    if savepath:
+        fig.savefig(savepath, dpi=300, bbox_inches="tight")
     plt.show()
 
 
@@ -162,7 +179,7 @@ def visualize_log_likelihood_along_superposed_trajectory(log_likelihood_a, log_l
     plt.grid()
     plt.show()
 
-def visualize_composition(superposed_trajectory, sample_data_steps_1, sample_data_steps_2, sample_data_steps_1_label: str = "Up Noise", sample_data_steps_2_label: str = "Down Noise", figsize: Tuple[int,int] =(23,5), lim=(-3, 3), num_axis: int = 6, title="Composition Of Pre-Trained Diffusion Models"):
+def visualize_composition(superposed_trajectory, sample_data_steps_1, sample_data_steps_2, sample_data_steps_1_label: str = "Up Noise", sample_data_steps_2_label: str = "Down Noise", figsize: Tuple[int,int] =(23,5), lim=(-3, 3), num_axis: int = 6, title="Composition Of Pre-Trained Diffusion Models", savepath: str = None):
     timesteps: np.ndarray = np.linspace(0.0, 1.0, np.array(len(sample_data_steps_1)))
     gen_num_timesteps = superposed_trajectory.shape[1] - 1
     fig, axes = plt.subplots(1, len(timesteps), figsize=figsize, sharex=True, sharey=True)
@@ -177,19 +194,21 @@ def visualize_composition(superposed_trajectory, sample_data_steps_1, sample_dat
         ax.set_xlim(lim)
         ax.set_ylim(lim)
         ax.grid()
-
-    handles, legend_labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, legend_labels,
-               loc='upper center',
-               bbox_to_anchor=(0.5, -0.05),  # below all subplots
-               ncol=3,  # arrange in 3 columns
-               fontsize=12)
+    handles, labels_ = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels_,
+               loc="lower center",  # inside the figure, bottom center
+               bbox_to_anchor=(0.5, 0.0),
+               ncol=2, fontsize=12, frameon=True)
 
     fig.suptitle(title, fontsize=20)
-    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  # make room for suptitle + legend
-    plt.show()
 
-def visualize_compositions(superposed_trajectory, samples, labels, figsize: Tuple[int,int] =(23,5), num_axis: int = 6, lim=(-3,3), title: str = "Sampling From An Iso-Surface Of All Latents"):
+    # Reserve enough bottom space for the legend (adjust as needed)
+    fig.subplots_adjust(bottom=0.18, top=0.85)
+
+    if savepath:
+        fig.savefig(savepath, dpi=300, bbox_inches="tight")
+    plt.show()
+def visualize_compositions(superposed_trajectory, samples, labels, figsize: Tuple[int,int] =(23,5), num_axis: int = 6, lim=(-3,3), title: str = "Sampling From An Iso-Surface Of All Latents", savepath: str = None):
     timesteps: np.ndarray = np.linspace(0.0, 1.0, np.array(len(samples[0])))
     gen_num_timesteps = superposed_trajectory.shape[1] - 1
     fig, axes = plt.subplots(1, len(timesteps), figsize=figsize, sharex=True, sharey=True)
@@ -204,13 +223,17 @@ def visualize_compositions(superposed_trajectory, samples, labels, figsize: Tupl
         ax.set_xlim(lim)
         ax.set_ylim(lim)
         ax.grid()
-    handles, legend_labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, legend_labels,
-               loc='upper center',
-               bbox_to_anchor=(0.5, -0.05),  # below all subplots
-               ncol=3,  # arrange in 3 columns
-               fontsize=12)
+    handles, labels_ = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels_,
+               loc="lower center",  # inside the figure, bottom center
+               bbox_to_anchor=(0.5, 0.0),
+               ncol=2, fontsize=12, frameon=True)
 
     fig.suptitle(title, fontsize=20)
-    plt.tight_layout(rect=[0, 0.05, 1, 0.95])  # make room for suptitle + legend
+
+    # Reserve enough bottom space for the legend (adjust as needed)
+    fig.subplots_adjust(bottom=0.18, top=0.85)
+
+    if savepath:
+        fig.savefig(savepath, dpi=300, bbox_inches="tight")
     plt.show()
