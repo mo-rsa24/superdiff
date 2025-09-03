@@ -1,0 +1,14 @@
+.idea/
+.vscode/
+MNIST/
+*.flax
+*.idea
+*.iml
+*.xml
+*.pyc
+*.log
+*.wandb
+*.png
+*.json
+logs/
+runs/
