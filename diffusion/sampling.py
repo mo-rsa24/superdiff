@@ -72,56 +72,36 @@ def ito_dynamic_estimator_solver(key, t, state_a, state_b, trajectory, dt: float
 
 num_steps = 500
 
-def score_fn(score_model, params, x, t):
-    return score_model.apply(params, x, t)
+def _make_pmap_score_fn(score_model):
+    """Bind the Flax Module in a closure so pmap sees only JAX types."""
+    def _score_fn(params, x, t):
+        # If your TrainState.params is the full variables dict, this is already fine.
+        # If it's only the 'params' subtree, change to: score_model.apply({'params': params}, x, t)
+        return score_model.apply(params, x, t)
+    # params is broadcast (None); x and t are mapped on the leading device axis.
+    return jax.pmap(_score_fn, in_axes=(None, 0, 0))
 
 
-pmap_score_fn = jax.pmap(score_fn, in_axes=(None, None, 0, 0))
-
-
-def Euler_Maruyama_sampler(rng,
-                           score_model,
-                           params,
-                           marginal_prob_std,
-                           diffusion_coeff,
-                           batch_size=64,
-                           num_steps=num_steps,
-                           eps=1e-3):
-    """Generate samples from score-based models with the Euler-Maruyama solver.
-
-    Args:
-      rng: A JAX random state.
-      score_model: A `flax.linen.Module` object that represents the architecture
-        of a score-based model.
-      params: A dictionary that contains the model parameters.
-      marginal_prob_std: A function that gives the standard deviation of
-        the perturbation kernel.
-      diffusion_coeff: A function that gives the diffusion coefficient of the SDE.
-      batch_size: The number of samplers to generate by calling this function once.
-      num_steps: The number of sampling steps.
-        Equivalent to the number of discretized time steps.
-      eps: The smallest time step for numerical stability.
-
-    Returns:
-      Samples.
-    """
-    rng, step_rng = jax.random.split(rng)
-    time_shape = (jax.local_device_count(), batch_size // jax.local_device_count())
+def Euler_Maruyama_sampler(rng, score_model, params, marginal_prob_std, diffusion_coeff,
+                           batch_size=64, num_steps=num_steps, eps=1e-3):
+    ndev = jax.local_device_count()
+    assert batch_size % ndev == 0, "batch_size must be divisible by #devices"
+    time_shape   = (ndev, batch_size // ndev)
     sample_shape = time_shape + (28, 28, 1)
+    rng, step_rng = jax.random.split(rng)
     init_x = jax.random.normal(step_rng, sample_shape) * marginal_prob_std(1.)
     time_steps = jnp.linspace(1., eps, num_steps)
-    step_size = time_steps[0] - time_steps[1]
+    step_size  = time_steps[0] - time_steps[1]
     x = init_x
+
+    pmap_score = _make_pmap_score_fn(score_model)  # <-- bind once
+
     for time_step in tqdm.tqdm(time_steps):
-        batch_time_step = jnp.ones(time_shape) * time_step
+        batch_t = jnp.ones(time_shape) * time_step
         g = diffusion_coeff(time_step)
-        mean_x = x + (g ** 2) * pmap_score_fn(score_model,
-                                              params,
-                                              x,
-                                              batch_time_step) * step_size
+        mean_x = x + (g ** 2) * pmap_score(params, x, batch_t) * step_size
         rng, step_rng = jax.random.split(rng)
         x = mean_x + jnp.sqrt(step_size) * g * jax.random.normal(step_rng, x.shape)
-        # Do not include any noise in the last sampling step.
     return mean_x
 
 
@@ -133,66 +113,38 @@ signal_to_noise_ratio = 0.16  # @param {'type':'number'}
 num_steps = 500  # @param {'type':'integer'}
 
 
-def pc_sampler(rng,
-               score_model,
-               params,
-               marginal_prob_std,
-               diffusion_coeff,
-               batch_size=64,
-               num_steps=num_steps,
-               snr=signal_to_noise_ratio,
-               eps=1e-3):
-    """Generate samples from score-based models with Predictor-Corrector method.
-
-    Args:
-      rng: A JAX random state.
-      score_model: A `flax.linen.Module` that represents the
-        architecture of the score-based model.
-      params: A dictionary that contains the parameters of the score-based model.
-      marginal_prob_std: A function that gives the standard deviation
-        of the perturbation kernel.
-      diffusion_coeff: A function that gives the diffusion coefficient
-        of the SDE.
-      batch_size: The number of samplers to generate by calling this function once.
-      num_steps: The number of sampling steps.
-        Equivalent to the number of discretized time steps.
-      eps: The smallest time step for numerical stability.
-
-    Returns:
-      Samples.
-    """
-    time_shape = (jax.local_device_count(), batch_size // jax.local_device_count())
+def pc_sampler(rng, score_model, params, marginal_prob_std, diffusion_coeff,
+               batch_size=64, num_steps=num_steps, snr=signal_to_noise_ratio, eps=1e-3):
+    ndev = jax.local_device_count()
+    assert batch_size % ndev == 0, "batch_size must be divisible by #devices"
+    time_shape   = (ndev, batch_size // ndev)
     sample_shape = time_shape + (28, 28, 1)
     rng, step_rng = jax.random.split(rng)
     init_x = jax.random.normal(step_rng, sample_shape) * marginal_prob_std(1.)
     time_steps = jnp.linspace(1., eps, num_steps)
-    step_size = time_steps[0] - time_steps[1]
+    step_size  = time_steps[0] - time_steps[1]
     x = init_x
+
+    pmap_score = _make_pmap_score_fn(score_model)  # <-- bind once
+
     for time_step in tqdm.tqdm(time_steps):
-        batch_time_step = jnp.ones(time_shape) * time_step
-        # Corrector step (Langevin MCMC)
-        grad = pmap_score_fn(score_model, params, x, batch_time_step)
-        grad_norm = jnp.linalg.norm(grad.reshape(sample_shape[0], sample_shape[1], -1),
-                                    axis=-1).mean()
+        batch_t = jnp.ones(time_shape) * time_step
+        # Corrector (Langevin)
+        grad = pmap_score(params, x, batch_t)
+        grad_norm  = jnp.linalg.norm(grad.reshape(sample_shape[0], sample_shape[1], -1), axis=-1).mean()
         noise_norm = np.sqrt(np.prod(x.shape[1:]))
-        langevin_step_size = 2 * (snr * noise_norm / grad_norm) ** 2
+        langevin_step = 2 * (snr * noise_norm / grad_norm) ** 2
         rng, step_rng = jax.random.split(rng)
         z = jax.random.normal(step_rng, x.shape)
-        x = x + langevin_step_size * grad + jnp.sqrt(2 * langevin_step_size) * z
-
-        # Predictor step (Euler-Maruyama)
+        x = x + langevin_step * grad + jnp.sqrt(2 * langevin_step) * z
+        # Predictor (EM)
         g = diffusion_coeff(time_step)
-        score = pmap_score_fn(score_model, params, x, batch_time_step)
+        score = pmap_score(params, x, batch_t)
         x_mean = x + (g ** 2) * score * step_size
         rng, step_rng = jax.random.split(rng)
         z = jax.random.normal(step_rng, x.shape)
         x = x_mean + jnp.sqrt(g ** 2 * step_size) * z
-
-        # The last step does not include any noise
     return x_mean
-
-
-# @title Define the ODE sampler (double click to expand or collapse)
 
 from scipy import integrate
 
@@ -200,37 +152,13 @@ from scipy import integrate
 error_tolerance = 1e-5  # @param {'type': 'number'}
 
 
-def ode_sampler(rng,
-                score_model,
-                params,
-                marginal_prob_std,
-                diffusion_coeff,
-                batch_size=64,
-                atol=error_tolerance,
-                rtol=error_tolerance,
-                z=None,
-                eps=1e-3):
-    """Generate samples from score-based models with black-box ODE solvers.
-
-    Args:
-      rng: A JAX random state.
-      score_model: A `flax.linen.Module` object  that represents architecture
-        of the score-based model.
-      params: A dictionary that contains model parameters.
-      marginal_prob_std: A function that returns the standard deviation
-        of the perturbation kernel.
-      diffusion_coeff: A function that returns the diffusion coefficient of the SDE.
-      batch_size: The number of samplers to generate by calling this function once.
-      atol: Tolerance of absolute errors.
-      rtol: Tolerance of relative errors.
-      z: The latent code that governs the final sample. If None, we start from p_1;
-        otherwise, we start from the given z.
-      eps: The smallest time step for numerical stability.
-    """
-
-    time_shape = (jax.local_device_count(), batch_size // jax.local_device_count())
+def ode_sampler(rng, score_model, params, marginal_prob_std, diffusion_coeff,
+                batch_size=64, atol=error_tolerance, rtol=error_tolerance, z=None, eps=1e-3):
+    ndev = jax.local_device_count()
+    assert batch_size % ndev == 0, "batch_size must be divisible by #devices"
+    time_shape   = (ndev, batch_size // ndev)
     sample_shape = time_shape + (28, 28, 1)
-    # Create the latent code
+
     if z is None:
         rng, step_rng = jax.random.split(rng)
         z = jax.random.normal(step_rng, sample_shape)
@@ -238,25 +166,20 @@ def ode_sampler(rng,
     else:
         init_x = z
 
-    shape = init_x.shape
+    pmap_score = _make_pmap_score_fn(score_model)  # <-- bind once
 
     def score_eval_wrapper(sample, time_steps):
-        """A wrapper of the score-based model for use by the ODE solver."""
         sample = jnp.asarray(sample, dtype=jnp.float32).reshape(sample_shape)
         time_steps = jnp.asarray(time_steps).reshape(time_shape)
-        score = pmap_score_fn(score_model, params, sample, time_steps)
+        score = pmap_score(params, sample, time_steps)
         return np.asarray(score).reshape((-1,)).astype(np.float64)
 
     def ode_func(t, x):
-        """The ODE function for use by the ODE solver."""
         time_steps = np.ones(time_shape) * t
         g = diffusion_coeff(t)
         return -0.5 * (g ** 2) * score_eval_wrapper(x, time_steps)
 
-    # Run the black-box ODE solver.
     res = integrate.solve_ivp(ode_func, (1., eps), np.asarray(init_x).reshape(-1),
                               rtol=rtol, atol=atol, method='RK45')
-    print(f"Number of function evaluations: {res.nfev}")
-    x = jnp.asarray(res.y[:, -1]).reshape(shape)
-
+    x = jnp.asarray(res.y[:, -1]).reshape(init_x.shape)
     return x

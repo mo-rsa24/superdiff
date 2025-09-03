@@ -17,15 +17,55 @@ from diffusion.equations import marginal_prob_std_fn, diffusion_coeff_fn
 from diffusion.sampling import ode_sampler
 from models.unet import ScoreNet
 from train.train_score_sde import get_train_step_fn
+import argparse, json, hashlib, time
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--resume", choices=["auto", "never", "require"], default="auto")
+    p.add_argument("--out_root", type=str, default="runs")
+    p.add_argument("--run_name", type=str, default=None)
+    p.add_argument("--ckpt_name", type=str, default="ckpt.flax")
+    return p.parse_args()
 
 # ------------------ Config ------------------
+
+args = parse_args()
+run_name = args.run_name or time.strftime("exp-%Y%m%d-%H%M%S")
+out_dir = os.path.join(args.out_root, run_name)
+os.makedirs(out_dir, exist_ok=True)
+ckpt_path = os.path.join(out_dir, args.ckpt_name)
+samples_dir = os.path.join(out_dir, "samples")
+os.makedirs(samples_dir, exist_ok=True)
+
+manifest = {
+    "run_name": run_name,
+    "resume": args.resume,
+    "n_epochs": 50,
+    "batch_size": 256,
+    "lr": 1e-4,
+}
+with open(os.path.join(out_dir, "manifest.json"), "w") as f:
+    json.dump(manifest, f, indent=2)
+
+
+def maybe_load_ckpt(host_state, ckpt_path, policy):
+    if policy == "never":
+        print("[info] Resume policy=never; starting fresh.")
+        return host_state
+    exists = tf.io.gfile.exists(ckpt_path)
+    if policy == "require" and not exists:
+        raise FileNotFoundError(f"Resume policy=require but missing checkpoint: {ckpt_path}")
+    if exists:
+        print(f"[info] Resume policy={policy}; loading checkpoint from {ckpt_path}")
+        with tf.io.gfile.GFile(ckpt_path, 'rb') as fin:
+            return from_bytes(host_state, fin.read())
+    print("[info] No checkpoint found. Starting fresh.")
+    return host_state
+
+
 n_epochs   = 50
 batch_size = 256
 lr         = 1e-4
-ckpt_path  = "ckpt.flax"
-samples_dir = "samples"
-os.makedirs(samples_dir, exist_ok=True)
-
 rng = jax.random.PRNGKey(0)
 fake_input = jnp.ones((batch_size, 28, 28, 1))
 fake_time = jnp.ones(batch_size)
@@ -65,7 +105,7 @@ for epoch in tqdm_epoch:
   # Print the averaged training loss so far.
   tqdm_epoch.set_description('Average Loss: {:5f}'.format(avg_loss / num_items))
   host_state = jax.device_get(jax.tree_map(lambda x: x[0], state))
-  with tf.io.gfile.GFile('ckpt.flax', 'wb') as fout:
+  with tf.io.gfile.GFile(ckpt_path, 'wb') as fout:
       fout.write(to_bytes(host_state))
 
 # ------- Sampling -------
@@ -82,13 +122,14 @@ params = score_model.init({'params': rng}, fake_input, fake_time)
 sample_state = TrainState.create(apply_fn=score_model.apply, params=params, tx=optax.adam(lr))
 
 # Load if checkpoint exists (it should after training)
-if tf.io.gfile.exists(ckpt_path):   # <- NEW
+if tf.io.gfile.exists(ckpt_path):
     print(f"[info] Loading checkpoint for sampling from {ckpt_path}")
     with tf.io.gfile.GFile(ckpt_path, 'rb') as fin:
         sample_state = from_bytes(sample_state, fin.read())
 else:
     print("[warn] No checkpoint found for sampling; using freshly-initialized params.")
-
+    
+    
 rng, step_rng = jax.random.split(rng)
 samples = sampler(
     rng=step_rng,
