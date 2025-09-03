@@ -113,6 +113,11 @@ def parse_args():
     p.add_argument("--wandb_tags", default="", help="Comma-separated tags")
     p.add_argument("--wandb_id", default=None, help="Set to resume a specific W&B run id")
 
+    p.add_argument("--postfix_every_steps", type=int, default=25,
+                   help="How often tqdm.set_postfix runs (steps)")
+    p.add_argument("--log_every_steps", type=int, default=100,
+                   help="How often to log metrics (steps)")
+
     return p.parse_args()
 
 
