@@ -1,195 +1,197 @@
 #!/usr/bin/env bash
-#
-# sbatch cxr_sde.slurm
-#
 #SBATCH --job-name=cxr-sde
 #SBATCH --partition=bigbatch
 #SBATCH --time=72:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
-# =========================
-# Pretty colors & helpers
-# =========================
-if [[ -n "${NO_COLOR:-}" ]]; then
-  RED=""; GRN=""; YLW=""; BLU=""; CYN=""; MAG=""; BLD=""; DIM=""; RST=""
-else
-  RED=$'\033[1;31m'; GRN=$'\033[1;32m'; YLW=$'\033[1;33m'
-  BLU=$'\033[1;34m'; CYN=$'\033[1;36m'; MAG=$'\033[1;35m'
-  BLD=$'\033[1m';    DIM=$'\033[2m';    RST=$'\033[0m'
-fi
 
-banner() {
-  local msg="$1"
-  echo -e "${BLU}${BLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
-  echo -e "${BLU}${BLD}▶ ${msg}${RST}"
-  echo -e "${BLU}${BLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
-}
+set -euo pipefail
 
-kv() {
-  printf "%s%-22s%s %s\n" "${CYN}${BLD}" "$1" "${RST}" "$2"
-}
+# ----------------------------
+# Pretty printing helpers
+# ----------------------------
+RED=$'\e[31m'; GRN=$'\e[32m'; YLW=$'\e[33m'; BLU=$'\e[34m'; MAG=$'\e[35m'; CYN=$'\e[36m'; BLD=$'\e[1m'; RST=$'\e[0m'
+banner(){ printf "\n${BLU}${BLD}== %s ==${RST}\n" "$*"; }
+kv(){ printf "  ${CYN}%-22s${RST} %s\n" "$1" "$2"; }
+ok(){ printf "${GRN}%s${RST}\n" "$*"; }
+warn(){ printf "${YLW}%s${RST}\n" "$*"; }
+err(){ printf "${RED}%s${RST}\n" "$*"; }
 
-ok()   { echo -e "${GRN}✔${RST} $*"; }
-warn() { echo -e "${YLW}⚠${RST} $*"; }
-err()  { echo -e "${RED}✖${RST} $*"; }
+START_TS=$(date -Iseconds)
 
-# =========================
-# User config (override with sbatch --export=ALL,VAR=...)
-# =========================
-WORKDIR="${WORKDIR:-$HOME/Playground/PhD/superdiff}"
-PYFILE="${PYFILE:-run/cxr.py}"
-
+# ----------------------------
+# Defaults (override via env)
+# ----------------------------
+WORKDIR="${WORKDIR:-$PWD}"             # project root (folder that contains run/cxr.py)
+PYFILE="${PYFILE:-run/cxr.py}"         # entrypoint
 DATA_ROOT="/gluster/mmolefe/PhD/Super-Position Of Medical Imaging Diffusion Models For Disease Discovery/datasets/cleaned"
-TASK="${TASK:-TB}"
+
+TASK="${TASK:-TB}"                     # TB | PNEUMONIA
 SPLIT="${SPLIT:-train}"
-
-MODE="${MODE:-of1}"         # of1 | tiny | full
-K="${K:-8}"
-
 IMG_SIZE="${IMG_SIZE:-256}"
-CHANNELS="${CHANNELS:-64,128,256,512}"
+
+# Overfit / tiny controls
+OVERFIT_ONE="${OVERFIT_ONE:-1}"        # 1 to overfit a single image
+OVERFIT_K="${OVERFIT_K:-0}"            # >0 to train on tiny-K
+REPEAT_LEN="${REPEAT_LEN:-32768}"
+
+# Model width
+CHANNELS="${CHANNELS:-96,192,384,768}" # pass colon-separated if using --export; script converts below
+EMBED_DIM="${EMBED_DIM:-256}"
+
+# Schedule & sampler
+SDE="${SDE:-VE}"                       # VE | VPSDE
+SIGMA_MAX="${SIGMA_MAX:-12.0}"         # used if SDE==VE
+SAMPLER="${SAMPLER:-pc}"               # pc | em | ode
+NUM_STEPS="${NUM_STEPS:-500}"
+SNR="${SNR:-0.16}"                     # only meaningful for PC
+EPS="${EPS:-1e-3}"
+
+# Training hygiene
 LR="${LR:-2e-4}"
+MIN_LR="${MIN_LR:-1e-5}"
+WARMUP_STEPS="${WARMUP_STEPS:-1000}"
+SCHEDULE="${SCHEDULE:-cosine}"         # const | cosine
+GRAD_CLIP="${GRAD_CLIP:-1.0}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
+EPOCHS="${EPOCHS:-80}"
 BATCH_PER_DEVICE="${BATCH_PER_DEVICE:-4}"
-EPOCHS="${EPOCHS:-50}"
-SAMPLE_EVERY="${SAMPLE_EVERY:-1}"
 SAMPLE_BATCH_SIZE="${SAMPLE_BATCH_SIZE:-8}"
+SAMPLE_EVERY="${SAMPLE_EVERY:-1}"
+SEED="${SEED:-0}"
 
-EXP_NAME="${EXP_NAME:-tb256-${MODE}}"
-RUN_NAME="${RUN_NAME:-}"
+# EMA
+EMA_DECAY="${EMA_DECAY:-0.9995}"
+USE_EMA_FOR_SAMPLING="${USE_EMA_FOR_SAMPLING:-1}"
 
-USE_WANDB="${USE_WANDB:-1}"
+# Experiment naming / output
+OUTPUT_ROOT="${OUTPUT_ROOT:-runs}"
+EXP_NAME="${EXP_NAME:-cxr_sde}"
+RUN_NAME="${RUN_NAME:-}"               # optional
+RESUME_DIR="${RESUME_DIR:-}"           # optional
+SAMPLES_DIR="${SAMPLES_DIR:-}"         # optional
+
+# WandB toggles
+WANDB="${WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-cxr-sde}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
-WANDB_TAGS="${WANDB_TAGS:-slurm}"
+WANDB_TAGS="${WANDB_TAGS:-slurm}"      # pass colon-separated if using --export
+WANDB_ID="${WANDB_ID:-}"
 
-ENV_NAME="${ENV_NAME:-jax115}"
-
-export PYTHONUNBUFFERED=1
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export TF_CPP_MIN_LOG_LEVEL=1
-
-# =========================
-# Preamble
-# =========================
-set -euo pipefail
-SECONDS=0
+# ----------------------------
+# Environment & paths
+# ----------------------------
 mkdir -p "$WORKDIR/logs"
-
-banner "SLURM Job Info"
-kv "SLURM_JOB_ID"        "${SLURM_JOB_ID:-<none>}"
-kv "SLURM_JOB_NAME"      "${SLURM_JOB_NAME:-<none>}"
-kv "Partition"           "${SLURM_JOB_PARTITION:-${SLURM_PARTITION:-<none>}}"
-kv "Submit host"         "$(hostname)"
-kv "When"                "$(date -Iseconds)"
-
-banner "Paths & Program"
-kv "WORKDIR"             "$WORKDIR"
-kv "PYFILE"              "$PYFILE"
-kv "CWD (initial)"       "$(pwd)"
-
-# =========================
-# Environment
-# =========================
-banner "Environment Setup"
 cd "$WORKDIR"
-export PYTHONPATH="$WORKDIR:$WORKDIR/run:${PYTHONPATH:-}"
-echo "[PYTHONPATH] $PYTHONPATH"
-ok "cd $WORKDIR"
 
+# Make PYTHONPATH robust even with `set -u`
+export PYTHONPATH="$WORKDIR${PYTHONPATH:+:$PYTHONPATH}"
+
+# Prefer CUDA for JAX, avoid huge preallocation
+export JAX_PLATFORMS=cuda
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export TF_CPP_MIN_LOG_LEVEL=3
+
+# Activate your env (choose one that exists on your cluster)
 source ~/.bashrc
 mamba activate "$ENV_NAME"
 ok "Activated micromamba: $ENV_NAME"
+# ----------------------------
+# Normalize list-like vars
+# (allow colon-separated in --export)
+# ----------------------------
+CHANNELS="${CHANNELS//:/,}"
+WANDB_TAGS="${WANDB_TAGS//:/,}"
 
-if command -v nvidia-smi >/dev/null 2>&1; then
-  banner "GPU Inventory"
-  nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader || true
-else
-  warn "nvidia-smi not found"
-fi
-
-banner "Python / JAX Summary"
-python - <<'PYINFO' || true
-import platform, sys
-print(f"Python: {platform.python_version()}  ({sys.executable})")
-try:
-  import jax, jaxlib
-  from jax.lib import xla_bridge
-  print(f"JAX:    {jax.__version__}")
-  print(f"jaxlib: {jaxlib.__version__}")
-  print(f"Backend: {xla_bridge.get_backend().platform}")
-  print("Devices:", [str(d) for d in jax.devices()])
-except Exception as e:
-  print("JAX summary failed:", e)
-PYINFO
-
-# =========================
-# Effective arguments (build safely)
-# =========================
-declare -a ARGS=(
+# ----------------------------
+# Build args array safely
+# ----------------------------
+ARGS=(
   --data_root "$DATA_ROOT"
-  --task "$TASK"
-  --split "$SPLIT"
-  --img_size "$IMG_SIZE"
-  --channels "$CHANNELS"
-  --lr "$LR"
-  --batch_per_device "$BATCH_PER_DEVICE"
-  --sample_every "$SAMPLE_EVERY"
-  --sample_batch_size "$SAMPLE_BATCH_SIZE"
-  --epochs "$EPOCHS"
-  --exp_name "$EXP_NAME"
+  --task "$TASK" --split "$SPLIT" --img_size "$IMG_SIZE"
+  --channels "$CHANNELS" --embed_dim "$EMBED_DIM"
+  --sde "$SDE" --sampler "$SAMPLER" --num_steps "$NUM_STEPS" --eps "$EPS"
+  --lr "$LR" --min_lr "$MIN_LR" --warmup_steps "$WARMUP_STEPS" --schedule "$SCHEDULE"
+  --grad_clip "$GRAD_CLIP" --weight_decay "$WEIGHT_DECAY"
+  --epochs "$EPOCHS" --batch_per_device "$BATCH_PER_DEVICE" --sample_batch_size "$SAMPLE_BATCH_SIZE"
+  --seed "$SEED" --sample_every "$SAMPLE_EVERY"
+  --ema_decay "$EMA_DECAY"
+  --output_root "$OUTPUT_ROOT" --exp_name "$EXP_NAME"
 )
 
-case "$MODE" in
-  of1)  ARGS+=( --overfit_one --eval_mse_to_target ) ;;
-  tiny) ARGS+=( --overfit_k "$K" ) ;;
-  full) : ;;
-  *)    err "Unknown MODE='$MODE' (expected: of1 | tiny | full)"; exit 1 ;;
-esac
-
-if [[ "$USE_WANDB" == "1" ]]; then
-  ARGS+=( --wandb --wandb_project "$WANDB_PROJECT" )
-  [[ -n "$WANDB_ENTITY" ]] && ARGS+=( --wandb_entity "$WANDB_ENTITY" )
-  [[ -n "$WANDB_TAGS" ]]   && ARGS+=( --wandb_tags "$WANDB_TAGS" )
-else
-  export WANDB_MODE=offline
+# VE-only flag
+if [[ "${SDE^^}" == "VE" ]]; then
+  ARGS+=( --sigma_max "$SIGMA_MAX" )
 fi
 
-[[ -n "$RUN_NAME" ]] && ARGS+=( --run_name "$RUN_NAME" )
+# EMA sampling
+if [[ "$USE_EMA_FOR_SAMPLING" == "1" ]]; then
+  ARGS+=( --use_ema_for_sampling )
+fi
 
-banner "Experiment Variables"
-kv "MODE"                 "$MODE"
-kv "DATA_ROOT"            "$DATA_ROOT"
-kv "TASK/SPLIT"           "$TASK / $SPLIT"
-kv "IMG_SIZE"             "$IMG_SIZE"
-kv "CHANNELS"             "$CHANNELS"
-kv "LR"                   "$LR"
-kv "BATCH_PER_DEVICE"     "$BATCH_PER_DEVICE"
-kv "EPOCHS"               "$EPOCHS"
-kv "SAMPLE_EVERY"         "$SAMPLE_EVERY"
-kv "SAMPLE_BATCH_SIZE"    "$SAMPLE_BATCH_SIZE"
-kv "EXP_NAME"             "$EXP_NAME"
-kv "RUN_NAME"             "${RUN_NAME:-<auto>}"
-kv "WANDB"                "$([[ ${USE_WANDB} == 1 ]] && echo enabled || echo disabled)"
-kv "WANDB_PROJECT"        "$WANDB_PROJECT"
-kv "WANDB_ENTITY"         "${WANDB_ENTITY:-<none>}"
-kv "WANDB_TAGS"           "${WANDB_TAGS:-<none>}"
+# Overfit/tiny
+if [[ "$OVERFIT_ONE" == "1" ]]; then
+  ARGS+=( --overfit_one --repeat_len "$REPEAT_LEN" )
+elif (( OVERFIT_K > 0 )); then
+  ARGS+=( --overfit_k "$OVERFIT_K" )
+fi
 
-banner "Launch Command"
-echo -e "${MAG}${BLD}srun python -u ${PYFILE} ${RST}${DIM}\\"
-# SAFE: print one arg per line, no pair assumption
-for arg in "${ARGS[@]}"; do
-  printf "  %s%q%s \\\n" "${DIM}" "$arg" "${RST}"
-done
-echo -e "${RST}"
+# Optional explicit samples dir / run name / resume
+[[ -n "$SAMPLES_DIR" ]] && ARGS+=( --samples_dir "$SAMPLES_DIR" )
+[[ -n "$RUN_NAME"    ]] && ARGS+=( --run_name "$RUN_NAME" )
+[[ -n "$RESUME_DIR"  ]] && ARGS+=( --resume_dir "$RESUME_DIR" )
 
-# =========================
+# WandB
+if [[ "$WANDB" == "1" ]]; then
+  ARGS+=( --wandb --wandb_project "$WANDB_PROJECT" )
+  [[ -n "$WANDB_ENTITY" ]] && ARGS+=( --wandb_entity "$WANDB_ENTITY" )
+  [[ -n "$WANDB_TAGS"   ]] && ARGS+=( --wandb_tags "$WANDB_TAGS" )
+  [[ -n "$WANDB_ID"     ]] && ARGS+=( --wandb_id "$WANDB_ID" )
+fi
+
+# ----------------------------
+# Info
+# ----------------------------
+banner "SLURM Job Info"
+kv "JOB_ID"         "${SLURM_JOB_ID:-<none>}"
+kv "JOB_NAME"       "${SLURM_JOB_NAME:-<none>}"
+kv "Partition"      "${SLURM_JOB_PARTITION:-${SLURM_PARTITION:-<none>}}"
+kv "Node"           "$(hostname)"
+kv "When"           "$START_TS"
+
+banner "Program"
+kv "WORKDIR"        "$WORKDIR"
+kv "PYFILE"         "$PYFILE"
+kv "DATA_ROOT"      "$DATA_ROOT"
+
+banner "Flags"
+kv "TASK/SPLIT"     "$TASK / $SPLIT"
+kv "IMG_SIZE"       "$IMG_SIZE"
+kv "CHANNELS"       "$CHANNELS"
+kv "SDE"            "$SDE"
+kv "SIGMA_MAX"      "$SIGMA_MAX"
+kv "SAMPLER"        "$SAMPLER"
+kv "NUM_STEPS"      "$NUM_STEPS"
+kv "SNR"            "$SNR"
+kv "EPS"            "$EPS"
+kv "EMA_DECAY"      "$EMA_DECAY"
+kv "EMA_SAMPLING"   "$USE_EMA_FOR_SAMPLING"
+kv "LR/SCHED"       "$LR / $SCHEDULE (warmup=$WARMUP_STEPS→min=$MIN_LR)"
+kv "EPOCHS"         "$EPOCHS"
+kv "BATCHxDEVS"     "$BATCH_PER_DEVICE x $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 1)"
+kv "REPEAT_LEN"     "$REPEAT_LEN (of1=$OVERFIT_ONE, tinyK=$OVERFIT_K)"
+kv "W&B"            "$WANDB (${WANDB_PROJECT}) tags=[$WANDB_TAGS]"
+
+# ----------------------------
 # Run
-# =========================
-START_TS=$(date -Iseconds)
-ok "Starting at ${START_TS}"
-
+# ----------------------------
 set +e
+if [[ "${SAMPLER}" == "pc" ]]; then
+  # PC needs SNR forwarded through env → ARGS (your sampler reads it from ARGS in cxr.py)
+  ARGS+=( --snr "$SNR" )
+fi
+
 srun python -u "$PYFILE" "${ARGS[@]}"
 RC=$?
 set -e
@@ -197,9 +199,7 @@ set -e
 END_TS=$(date -Iseconds)
 ELAPSED="$((SECONDS/3600))h $(( (SECONDS%3600)/60 ))m $((SECONDS%60))s"
 
-banner "Job Completed"
-kv "Start"    "$START_TS"
-kv "End"      "$END_TS"
-kv "Elapsed"  "$ELAPSED"
+banner "Done"
 kv "ExitCode" "$RC"
-if [[ $RC -eq 0 ]]; then ok "Success."; else err "Failure (exit $RC). Check logs."; fi
+kv "Elapsed"  "$ELAPSED"
+[[ $RC -eq 0 ]] && ok "Success." || { err "Failure (exit $RC)"; exit "$RC"; }
