@@ -69,16 +69,6 @@ def ensure_dir(p):
 
 def tree_ema_update(ema, new, decay):
     return jax.tree_map(lambda e, p: e * decay + (1.0 - decay) * p, ema, new)
-
-
-# ---------------- EMA-capable TrainState ----------------
-
-@struct.dataclass
-class TrainStateEMA(TrainState):
-    ema_params: any = None
-    ema_decay: float = 0.999
-
-
 # ---------------- CLI ----------------
 
 def parse_args():
@@ -292,13 +282,12 @@ def main():
         optax.adamw(learning_rate=lr_schedule, weight_decay=args.weight_decay),
     )
 
-    host_state = TrainStateEMA.create(
+    host_state = TrainState.create(
         apply_fn=score_model.apply,
         params=params,
         tx=tx,
-        ema_params=params,
-        ema_decay=args.ema_decay,
     )
+    ema_params = host_state.params  # start EMA at init params
 
     # ---- Resume from checkpoint if requested or present ----
     resume_ckpt = None
@@ -309,16 +298,26 @@ def main():
 
     if resume_ckpt:
         print(f"[info] Loading checkpoint from {resume_ckpt}")
+        with tf.io.gfile.GFile(resume_ckpt, "rb") as f:
+            blob = f.read()
+        # Try new format first: (TrainState, ema_params, ema_decay)
         try:
-            with tf.io.gfile.GFile(resume_ckpt, "rb") as f:
-                host_state = from_bytes(host_state, f.read())
+            host_state, ema_params, loaded_decay = from_bytes(
+                (host_state, ema_params, args.ema_decay), blob
+            )
+            # keep CLI value if user set it; otherwise adopt loaded
+            if "ema_decay" not in vars(args) or args.ema_decay is None:
+                args.ema_decay = float(loaded_decay)
+            print("[info] Loaded (TrainState, EMA, decay).")
         except Exception:
-            # Backward-compat: old checkpoints without EMA
-            print("[warn] Failed to load EMA state; attempting to load as plain TrainState.")
-            plain = TrainState.create(apply_fn=score_model.apply, params=params, tx=tx)
-            with tf.io.gfile.GFile(resume_ckpt, "rb") as f:
-                plain = from_bytes(plain, f.read())
-            host_state = host_state.replace(params=plain.params, ema_params=plain.params)
+            # Fallback: plain TrainState (older runs). Use params as EMA.
+            try:
+                host_state = from_bytes(host_state, blob)
+                ema_params = host_state.params
+                print("[warn] Loaded plain TrainState; initializing EMA from params.")
+            except Exception as e:
+                print(f"[warn] Could not deserialize checkpoint in any known format: {e}")
+                print("[warn] Starting fresh.")
     else:
         print("[info] No checkpoint; fresh training.")
 
@@ -369,7 +368,7 @@ def main():
 
     # Host copies for EMA updates/sampling/checkpoint
     host_params_last = jax.tree_map(lambda x: np.array(x), host_state.params)
-    ema_params = jax.tree_map(lambda x: np.array(x), host_state.ema_params)
+    ema_params = jax.tree_map(lambda x: np.array(x), ema_params)
 
     for epoch in tqdm.trange(args.epochs, desc="epochs"):
         losses = []
@@ -406,18 +405,14 @@ def main():
                 running_count = 0
 
         # Save checkpoint (include EMA)
-        host_state_to_save = TrainStateEMA.create(
-            apply_fn=score_model.apply,
-            params=host_params_last,
-            tx=host_state.tx,
-            ema_params=ema_params,
-            ema_decay=args.ema_decay,
-        )
-        ep_path = os.path.join(ckpt_dir, f"ep{epoch+1:04d}.flax")
+        host_state_to_save = jax.device_get(jax.tree_map(lambda v: v[0], state))
+        payload_bytes = to_bytes((host_state_to_save, ema_params, args.ema_decay))
+
+        ep_path = os.path.join(ckpt_dir, f"ep{epoch + 1:04d}.flax")
         with tf.io.gfile.GFile(ep_path, "wb") as f:
-            f.write(to_bytes(host_state_to_save))
+            f.write(payload_bytes)
         with tf.io.gfile.GFile(ckpt_latest, "wb") as f:
-            f.write(to_bytes(host_state_to_save))
+            f.write(payload_bytes)
 
         avg_loss = float(np.mean(losses)) if len(losses) else float("nan")
         print(f"[epoch {epoch+1}] avg loss: {avg_loss:.6f}")
