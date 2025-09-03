@@ -21,6 +21,27 @@ def q_t(data, t, standard_noise): # Forward Diffusion
   x_t = jnp.exp(log_alpha(t))*data + jnp.exp(log_sigma(t))*standard_noise
   return x_t
 
+def _log_alpha_bar_cosine(t, s=0.008):
+  # Nichol & Dhariwal cosine schedule in continuous time
+  c = (t + s) / (1.0 + s)
+  # add tiny epsilon for numerical stability
+  return 2.0 * jnp.log(jnp.cos(jnp.pi * c / 2.0 + 1e-12))
+
+
+# d/dt log alpha_bar
+_dlogab_dt = jax.grad(lambda _t: _log_alpha_bar_cosine(_t).sum())
+
+
+def vpsde_marginal_prob_std(t):
+  # std_t = sqrt(1 - alpha_bar(t))
+  return jnp.sqrt(1.0 - jnp.exp(_log_alpha_bar_cosine(t)))
+
+
+def vpsde_diffusion_coeff(t):
+  # β(t) = -d/dt log alpha_bar(t)
+  beta_t = -_dlogab_dt(t)
+  # g(t) = sqrt(β(t))
+  return jnp.sqrt(jnp.clip(beta_t, 1e-12, 1e12))
 
 def get_sdlogqdx_fn(model, params, train: bool = False):
   """

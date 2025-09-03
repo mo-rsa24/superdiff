@@ -241,3 +241,13 @@ def ode_sampler(rng,
     x = jnp.asarray(res.y[:, -1]).reshape(shape)
 
     return x
+
+def select_sampler(name: str):
+    name = name.lower()
+    if name in ("pc", "predictor-corrector"):
+        return pc_sampler
+    if name in ("em", "euler", "euler-maruyama"):
+        return Euler_Maruyama_sampler
+    if name in ("ode", "pf-ode", "probability-flow-ode"):
+        return ode_sampler
+    raise ValueError(f"Unknown sampler: {name}")
