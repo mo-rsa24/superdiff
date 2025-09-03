@@ -165,7 +165,13 @@ def main():
     ckpt_latest = os.path.join(ckpt_dir, "last.flax")
 
     # Snapshot config to file for provenance
-    cfg_dump = dict(**vars(args), exp_slug=exp_slug, run_dir=run_dir, ckpt_latest=ckpt_latest, samples_dir=samples_dir)
+    cfg_dump = dict(vars(args))
+    cfg_dump.update({
+        "exp_slug": exp_slug,
+        "run_dir": run_dir,
+        "ckpt_latest": ckpt_latest,
+        "samples_dir": samples_dir,  # override args.samples_dir (which may be None)
+    })
     ensure_dir(run_dir)
     with open(meta_path, "w") as f:
         json.dump(cfg_dump, f, indent=2, sort_keys=True)
