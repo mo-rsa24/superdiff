@@ -29,6 +29,13 @@ class Dense(nn.Module):
         return nn.Dense(self.output_dim)(x)[:, None, None, :]
 
 
+def _pick_gn_groups(C: int) -> int:
+    # Start from 32 and back off to a divisor of C
+    g = min(32, C)
+    while g > 1 and (C % g) != 0:
+        g //= 2
+    return max(1, g)
+
 class ScoreNet(nn.Module):
     """A time-dependent score-based model built upon U-Net architecture.
 
@@ -56,49 +63,50 @@ class ScoreNet(nn.Module):
         ## Incorporate information from t
         h1 += Dense(self.channels[0])(embed)
         ## Group normalization
-        h1 = nn.GroupNorm(4)(h1)
+        h1 = nn.GroupNorm(num_groups=_pick_gn_groups(self.channels[0]))(h1)
         h1 = act(h1)
         h2 = nn.Conv(self.channels[1], (3, 3), (2, 2), padding='VALID',
                      use_bias=False)(h1)
         h2 += Dense(self.channels[1])(embed)
-        h2 = nn.GroupNorm()(h2)
+        h2 = nn.GroupNorm(num_groups=_pick_gn_groups(self.channels[1]))(h2)
         h2 = act(h2)
         h3 = nn.Conv(self.channels[2], (3, 3), (2, 2), padding='VALID',
                      use_bias=False)(h2)
         h3 += Dense(self.channels[2])(embed)
-        h3 = nn.GroupNorm()(h3)
+        h3 = nn.GroupNorm(num_groups=_pick_gn_groups(self.channels[2]))(h3)
         h3 = act(h3)
         h4 = nn.Conv(self.channels[3], (3, 3), (2, 2), padding='VALID',
                      use_bias=False)(h3)
         h4 += Dense(self.channels[3])(embed)
-        h4 = nn.GroupNorm()(h4)
+        h4 = nn.GroupNorm(num_groups=_pick_gn_groups(self.channels[3]))(h4)
         h4 = act(h4)
 
         # Decoding path
         h = nn.Conv(self.channels[2], (3, 3), (1, 1), padding=((2, 2), (2, 2)),
                     input_dilation=(2, 2), use_bias=False)(h4)
-        ## Skip connection from the encoding path
         h += Dense(self.channels[2])(embed)
-        h = nn.GroupNorm()(h)
+        h = nn.GroupNorm(num_groups=_pick_gn_groups(self.channels[2]))(h)  # stays channels[2]
         h = act(h)
+
         h = nn.Conv(self.channels[1], (3, 3), (1, 1), padding=((2, 3), (2, 3)),
                     input_dilation=(2, 2), use_bias=False)(
             jnp.concatenate([h, h3], axis=-1)
         )
         h += Dense(self.channels[1])(embed)
-        h = nn.GroupNorm()(h)
+        h = nn.GroupNorm(num_groups=_pick_gn_groups(self.channels[1]))(h)  # <-- FIX to channels[1]
         h = act(h)
+
         h = nn.Conv(self.channels[0], (3, 3), (1, 1), padding=((2, 3), (2, 3)),
                     input_dilation=(2, 2), use_bias=False)(
             jnp.concatenate([h, h2], axis=-1)
         )
         h += Dense(self.channels[0])(embed)
-        h = nn.GroupNorm()(h)
+        h = nn.GroupNorm(num_groups=_pick_gn_groups(self.channels[0]))(h)  # <-- FIX to channels[0]
         h = act(h)
+
         h = nn.Conv(1, (3, 3), (1, 1), padding=((2, 2), (2, 2)))(
             jnp.concatenate([h, h1], axis=-1)
         )
-
         # Normalize output
         h = h / self.marginal_prob_std(t)[:, None, None, None]
         return h

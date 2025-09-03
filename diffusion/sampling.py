@@ -71,43 +71,25 @@ def ito_dynamic_estimator_solver(key, t, state_a, state_b, trajectory, dt: float
 
 
 num_steps = 500
-
-def score_fn(score_model, params, x, t):
-    return score_model.apply(params, x, t)
-
-
-pmap_score_fn = jax.pmap(score_fn, in_axes=(None, None, 0, 0))
+#
+# def score_fn(score_model, params, x, t):
+#     return score_model.apply(params, x, t)
 
 
-def Euler_Maruyama_sampler(rng,
-                           score_model,
-                           params,
-                           marginal_prob_std,
-                           diffusion_coeff,
-                           batch_size=64,
-                           num_steps=num_steps,
-                           eps=1e-3):
-    """Generate samples from score-based models with the Euler-Maruyama solver.
+# pmap_score_fn = jax.pmap(score_fn, in_axes=(None, None, 0, 0))
 
-    Args:
-      rng: A JAX random state.
-      score_model: A `flax.linen.Module` object that represents the architecture
-        of a score-based model.
-      params: A dictionary that contains the model parameters.
-      marginal_prob_std: A function that gives the standard deviation of
-        the perturbation kernel.
-      diffusion_coeff: A function that gives the diffusion coefficient of the SDE.
-      batch_size: The number of samplers to generate by calling this function once.
-      num_steps: The number of sampling steps.
-        Equivalent to the number of discretized time steps.
-      eps: The smallest time step for numerical stability.
+def make_pmap_score_fn(score_model):
+    def score_fn(params, x, t):
+        return score_model.apply(params, x, t)
+    return jax.pmap(score_fn, in_axes=(None, 0, 0))
 
-    Returns:
-      Samples.
-    """
+def Euler_Maruyama_sampler(rng, score_model, params, marginal_prob_std, diffusion_coeff,
+                           batch_size=64, num_steps=num_steps, eps=1e-3, img_size=28):
+    pmap_score_fn = make_pmap_score_fn(score_model)  # <-- add this
+
+    time_shape   = (jax.local_device_count(), batch_size // jax.local_device_count())
+    sample_shape = time_shape + (img_size, img_size, 1)  # <-- was hardcoded 28x28
     rng, step_rng = jax.random.split(rng)
-    time_shape = (jax.local_device_count(), batch_size // jax.local_device_count())
-    sample_shape = time_shape + (28, 28, 1)
     init_x = jax.random.normal(step_rng, sample_shape) * marginal_prob_std(1.)
     time_steps = jnp.linspace(1., eps, num_steps)
     step_size = time_steps[0] - time_steps[1]
@@ -115,14 +97,11 @@ def Euler_Maruyama_sampler(rng,
     for time_step in tqdm.tqdm(time_steps):
         batch_time_step = jnp.ones(time_shape) * time_step
         g = diffusion_coeff(time_step)
-        mean_x = x + (g ** 2) * pmap_score_fn(score_model,
-                                              params,
-                                              x,
-                                              batch_time_step) * step_size
+        mean_x = x + (g ** 2) * pmap_score_fn(params, x, batch_time_step) * step_size
         rng, step_rng = jax.random.split(rng)
         x = mean_x + jnp.sqrt(step_size) * g * jax.random.normal(step_rng, x.shape)
-        # Do not include any noise in the last sampling step.
     return mean_x
+
 
 
 # @title Define the Predictor-Corrector sampler (double click to expand or collapse)
@@ -139,6 +118,7 @@ def pc_sampler(rng,
                marginal_prob_std,
                diffusion_coeff,
                batch_size=64,
+               img_size=28,
                num_steps=num_steps,
                snr=signal_to_noise_ratio,
                eps=1e-3):
@@ -161,8 +141,9 @@ def pc_sampler(rng,
     Returns:
       Samples.
     """
+    pmap_score_fn = make_pmap_score_fn(score_model)
     time_shape = (jax.local_device_count(), batch_size // jax.local_device_count())
-    sample_shape = time_shape + (28, 28, 1)
+    sample_shape = time_shape + (img_size, img_size, 1)
     rng, step_rng = jax.random.split(rng)
     init_x = jax.random.normal(step_rng, sample_shape) * marginal_prob_std(1.)
     time_steps = jnp.linspace(1., eps, num_steps)
@@ -171,7 +152,7 @@ def pc_sampler(rng,
     for time_step in tqdm.tqdm(time_steps):
         batch_time_step = jnp.ones(time_shape) * time_step
         # Corrector step (Langevin MCMC)
-        grad = pmap_score_fn(score_model, params, x, batch_time_step)
+        grad = pmap_score_fn(params, x, batch_time_step)
         grad_norm = jnp.linalg.norm(grad.reshape(sample_shape[0], sample_shape[1], -1),
                                     axis=-1).mean()
         noise_norm = np.sqrt(np.prod(x.shape[1:]))
@@ -182,7 +163,7 @@ def pc_sampler(rng,
 
         # Predictor step (Euler-Maruyama)
         g = diffusion_coeff(time_step)
-        score = pmap_score_fn(score_model, params, x, batch_time_step)
+        score = pmap_score_fn(params, x, batch_time_step)
         x_mean = x + (g ** 2) * score * step_size
         rng, step_rng = jax.random.split(rng)
         z = jax.random.normal(step_rng, x.shape)
@@ -209,6 +190,7 @@ def ode_sampler(rng,
                 atol=error_tolerance,
                 rtol=error_tolerance,
                 z=None,
+                img_size=28,
                 eps=1e-3):
     """Generate samples from score-based models with black-box ODE solvers.
 
@@ -227,9 +209,9 @@ def ode_sampler(rng,
         otherwise, we start from the given z.
       eps: The smallest time step for numerical stability.
     """
-
-    time_shape = (jax.local_device_count(), batch_size // jax.local_device_count())
-    sample_shape = time_shape + (28, 28, 1)
+    pmap_score_fn = make_pmap_score_fn(score_model)
+    time_shape   = (jax.local_device_count(), batch_size // jax.local_device_count())
+    sample_shape = time_shape + (img_size, img_size, 1)
     # Create the latent code
     if z is None:
         rng, step_rng = jax.random.split(rng)
@@ -241,10 +223,9 @@ def ode_sampler(rng,
     shape = init_x.shape
 
     def score_eval_wrapper(sample, time_steps):
-        """A wrapper of the score-based model for use by the ODE solver."""
         sample = jnp.asarray(sample, dtype=jnp.float32).reshape(sample_shape)
         time_steps = jnp.asarray(time_steps).reshape(time_shape)
-        score = pmap_score_fn(score_model, params, sample, time_steps)
+        score = pmap_score_fn(params, sample, time_steps)
         return np.asarray(score).reshape((-1,)).astype(np.float64)
 
     def ode_func(t, x):
