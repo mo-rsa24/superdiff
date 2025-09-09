@@ -138,10 +138,143 @@ def parse_args():
 
     p.add_argument("--postfix_every_steps", type=int, default=25, help="How often tqdm.set_postfix runs (steps)")
     p.add_argument("--log_every_steps", type=int, default=100, help="How often to log metrics (steps)")
+
+    # --- Composition flags (optional; if set, we run composition-only flow) ---
+    p.add_argument("--compose_run_a", default=None, help="Run name under runs/ to use as Model A")
+    p.add_argument("--compose_run_b", default=None, help="Run name under runs/ to use as Model B")
+    p.add_argument("--compose_alpha", type=float, default=0.5, help="Fixed kappa in [0,1] for 'fixed' mode")
+    p.add_argument("--compose_mode", choices=["fixed", "sum", "normsum"], default="fixed")
+    p.add_argument("--compose_use_ema", action="store_true", help="Use EMA params from checkpoints (recommended)")
+    p.add_argument("--compose_sampler", choices=["pc", "em", "ode"], default="pc")
+    p.add_argument("--compose_num_steps", type=int, default=500)
+    p.add_argument("--compose_batch_size", type=int, default=8)
+
     return p.parse_args()
 
 
-# ---------------- Training entry ----------------
+# ---------- Composition helpers ----------
+
+def _parse_channels(s: str):
+    return tuple(int(c.strip()) for c in str(s).split(",") if c.strip())
+
+def _latest_subdir(path: str):
+    if not os.path.isdir(path):
+        raise FileNotFoundError(f"No run directory: {path}")
+    subs = [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
+    if not subs:
+        # allow runs written directly to runs/<name>/ (no timestamp layer)
+        return path
+    return os.path.join(path, sorted(subs)[-1])
+
+def _resolve_run_dir(output_root: str, run_name: str):
+    base = os.path.join(output_root, run_name)
+    return _latest_subdir(base)
+
+def _latest_ckpt(ckpt_dir: str):
+    last = os.path.join(ckpt_dir, "last.flax")
+    if tf.io.gfile.exists(last):
+        return last
+    # fallback: newest ep*.flax
+    eps = [p for p in tf.io.gfile.listdir(ckpt_dir) if p.startswith("ep") and p.endswith(".flax")]
+    if not eps:
+        raise FileNotFoundError(f"No checkpoints in {ckpt_dir}")
+    eps.sort()
+    return os.path.join(ckpt_dir, eps[-1])
+
+def _load_config(run_dir: str):
+    meta_path = os.path.join(run_dir, "run_meta.json")
+    if not tf.io.gfile.exists(meta_path):
+        raise FileNotFoundError(f"Missing run_meta.json in {run_dir}")
+    with tf.io.gfile.GFile(meta_path, "r") as f:
+        return json.load(f)
+
+def _build_sde_from_cfg(cfg):
+    """Make (marginal_prob_std_fn, diffusion_coeff_fn, sde_label) from a run's cfg."""
+    # Prefer the stored schedule for exact compatibility with that run
+    sde = cfg.get("sde", "VE")
+    try:
+        from diffusion.equations import vpsde_marginal_prob_std, vpsde_diffusion_coeff
+        _has_vpsde = True
+    except Exception:
+        _has_vpsde = False
+
+    if sde == "VPSDE" and _has_vpsde:
+        return vpsde_marginal_prob_std, vpsde_diffusion_coeff, "VPSDE(cosine)"
+    else:
+        from diffusion.equations import marginal_prob_std, diffusion_coeff
+        sigma_max = float(cfg.get("sigma_max", 25.0))
+        return functools.partial(marginal_prob_std, sigma=sigma_max), \
+               functools.partial(diffusion_coeff,   sigma=sigma_max), f"VE(σmax={sigma_max:g})"
+
+def _instantiate_model_from_cfg(cfg, marginal_prob_std_fn):
+    ch = _parse_channels(cfg.get("channels", "64,128,256,512"))
+    emb = int(cfg.get("embed_dim", 256))
+    return ScoreNet(marginal_prob_std_fn, channels=ch, embed_dim=emb), ch, emb
+
+def _load_params_tuple(path, state_template, ema_template, ema_decay_default):
+    with tf.io.gfile.GFile(path, "rb") as f:
+        blob = f.read()
+    # New format: (TrainState, ema_params, ema_decay)
+    try:
+        ts, ema, decay = from_bytes((state_template, ema_template, ema_decay_default), blob)
+        return ts.params, ema, decay
+    except Exception:
+        # Old format: TrainState only
+        ts = from_bytes(state_template, blob)
+        return ts.params, ts.params, ema_decay_default
+
+def _load_model_from_run(output_root, run_name):
+    """Return (score_model, params, cfg, run_dir). Uses EMA if present."""
+    run_dir = _resolve_run_dir(output_root, run_name)
+    cfg = _load_config(run_dir)
+    mstd, dcoeff, sde_label = _build_sde_from_cfg(cfg)
+
+    model, ch, emb = _instantiate_model_from_cfg(cfg, mstd)
+
+    ckpt_dir = os.path.join(run_dir, "ckpts")
+    ckpt = _latest_ckpt(ckpt_dir)
+
+    # Build templates for deserialization
+    # minimal fake batch to init shapes
+    H = int(cfg.get("img_size", 256))
+    C = 1
+    per_dev = max(1, int(cfg.get("batch_per_device", 4)))
+    batch = per_dev * max(1, n_local_devices())
+    fake_x = jnp.ones((batch, H, H, C), dtype=jnp.float32)
+    fake_t = jnp.ones((batch,), dtype=jnp.float32)
+    params = model.init({'params': jax.random.PRNGKey(0)}, fake_x, fake_t)
+    state_tmpl = TrainState.create(apply_fn=model.apply, params=params, tx=optax.adam(1e-4))
+    ema_tmpl = params
+
+    params_model, ema_params, decay = _load_params_tuple(ckpt, state_tmpl, ema_tmpl, cfg.get("ema_decay", 0.9995))
+    params_to_use = ema_params  # prefer EMA for sampling
+    return model, params_to_use, cfg, run_dir, (mstd, dcoeff, sde_label)
+
+def _assert_compat(cfg_a, cfg_b):
+    keys = ["img_size", "channels", "embed_dim", "sde", "sigma_max"]
+    mismatches = []
+    for k in keys:
+        if str(cfg_a.get(k)) != str(cfg_b.get(k)):
+            mismatches.append((k, cfg_a.get(k), cfg_b.get(k)))
+    if mismatches:
+        msg = "Incompatible runs for composition:\n" + "\n".join([f"  {k}: A={a} vs B={b}" for k,a,b in mismatches])
+        raise ValueError(msg)
+
+def _make_composed_pmap_score_fn(score_model):
+    """Return pmap over (params_a, params_b, x, t, alpha, mode_idx)."""
+    def score_fn(params_a, params_b, x, t, alpha, mode_idx):
+        s_a = score_model.apply(params_a, x, t)
+        s_b = score_model.apply(params_b, x, t)
+        # mode: 0=fixed, 1=sum, 2=normsum
+        def _fixed(_):
+            return s_b + alpha * (s_a - s_b)
+        def _sum(_):
+            return s_a + s_b
+        def _normsum(_):
+            return (s_a + s_b) / jnp.sqrt(2.0)
+        return jax.lax.switch(mode_idx, (_fixed, _sum, _normsum), operand=None)
+    return jax.pmap(score_fn, in_axes=(None, None, 0, 0, None, None))
+
 
 def main():
     args = parse_args()
@@ -482,7 +615,6 @@ def sample_and_log(rng_key,
     else:
         raise ValueError(f"Unknown sampler: {sampler_name}")
 
-    rng_key = jax.random.fold_in(rng_key, int(epoch))
     rng_key, step_rng = jax.random.split(rng_key)
     samples = _run(step_rng)
     samples = jnp.clip(samples, 0.0, 1.0)
@@ -519,8 +651,9 @@ def sample_and_log(rng_key,
 
     # Torchvision save
     save_image(grid, out_torchvision)
+
     print(f"[saved] {out_matplotlib}\n[saved] {out_torchvision}")
-    return [("sample_grid", grid_np)], eval_metrics, rng_key
+    return [("sample_grid", grid_np)], eval_metrics
 
 
 if __name__ == "__main__":

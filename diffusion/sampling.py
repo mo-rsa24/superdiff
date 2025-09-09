@@ -4,7 +4,7 @@ import numpy as np
 from jax import *
 from tqdm import trange
 import tqdm
-
+import math
 from diffusion.equations import diffusion, drift, score_function_hutchinson_estimator, get_kappa, dlog_alphadt, beta, \
     dlogqdt
 
@@ -85,10 +85,15 @@ def make_pmap_score_fn(score_model):
 
 def Euler_Maruyama_sampler(rng, score_model, params, marginal_prob_std, diffusion_coeff,
                            batch_size=64, num_steps=num_steps, eps=1e-3, img_size=28):
-    pmap_score_fn = make_pmap_score_fn(score_model)  # <-- add this
+    devices = jax.local_device_count()
+    if batch_size % devices != 0:
+        raise ValueError(
+            f"sample_batch_size ({batch_size}) must be divisible by local_device_count ({devices}). "
+            "Choose a multiple to avoid degenerate sampling.")
+    pmap_score_fn = make_pmap_score_fn(score_model)
 
-    time_shape   = (jax.local_device_count(), batch_size // jax.local_device_count())
-    sample_shape = time_shape + (img_size, img_size, 1)  # <-- was hardcoded 28x28
+    time_shape   = (devices, batch_size // devices)
+    sample_shape = time_shape + (img_size, img_size, 1)
     rng, step_rng = jax.random.split(rng)
     init_x = jax.random.normal(step_rng, sample_shape) * marginal_prob_std(1.)
     time_steps = jnp.linspace(1., eps, num_steps)
@@ -141,8 +146,14 @@ def pc_sampler(rng,
     Returns:
       Samples.
     """
+    devices = jax.local_device_count()
     pmap_score_fn = make_pmap_score_fn(score_model)
-    time_shape = (jax.local_device_count(), batch_size // jax.local_device_count())
+    time_shape = (devices, batch_size // devices)
+    if batch_size % devices != 0:
+        raise ValueError(
+                    f"sample_batch_size ({batch_size}) must be divisible by local_device_count ({devices}). "
+            "Choose a multiple to avoid degenerate sampling.")
+
     sample_shape = time_shape + (img_size, img_size, 1)
     rng, step_rng = jax.random.split(rng)
     init_x = jax.random.normal(step_rng, sample_shape) * marginal_prob_std(1.)
@@ -209,8 +220,13 @@ def ode_sampler(rng,
         otherwise, we start from the given z.
       eps: The smallest time step for numerical stability.
     """
+    devices = jax.local_device_count()
+    if batch_size % devices != 0:
+        raise ValueError(f"sample_batch_size ({batch_size}) must be divisible by local_device_count ({devices}). "
+            + "Choose a multiple to avoid degenerate sampling."
+            )
     pmap_score_fn = make_pmap_score_fn(score_model)
-    time_shape   = (jax.local_device_count(), batch_size // jax.local_device_count())
+    time_shape = (devices, batch_size // devices)
     sample_shape = time_shape + (img_size, img_size, 1)
     # Create the latent code
     if z is None:
