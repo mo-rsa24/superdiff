@@ -304,6 +304,18 @@ def parse_args():
     # Optional: estimate log-likelihood with superposed PF-ODE (needs patched diffusion.sampling/equations)
     p.add_argument("--estimate_ll", type=int, default=0)
 
+    # --- Visualization (train batches) ---
+    p.add_argument("--viz_train_grid", action="store_true",
+                   help="Periodically save a grid of the current training batch (B,1,H,W).")
+    p.add_argument("--viz_train_grid_every_steps", type=int, default=200,
+                   help="How often (in global steps) to save a training grid.")
+    p.add_argument("--viz_train_grid_max_images", type=int, default=64,
+                   help="Cap the number of images shown in the grid.")
+    p.add_argument("--viz_train_grid_nrow", type=int, default=0,
+                   help="Grid columns; 0 means auto sqrt.")
+    p.add_argument("--viz_train_grid_dir", default=None,
+                   help="Output dir for training grids (defaults to run_dir/train_grids).")
+
     return p.parse_args()
 
 
