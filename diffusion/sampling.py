@@ -8,6 +8,16 @@ import math
 from diffusion.equations import diffusion, drift, score_function_hutchinson_estimator, get_kappa, dlog_alphadt, beta, \
     dlogqdt
 
+def _sum_except_batch(x):
+    axes = tuple(range(1, x.ndim))
+    return jnp.sum(x, axis=axes, keepdims=True)
+
+
+def _broadcast_time(t_scalar, x):
+    """Make t broadcast like x: (N,1[,1,1...])"""
+    N = x.shape[0]
+    extra_ones = (1,) * (x.ndim - 1)
+    return jnp.ones((N,) + extra_ones, dtype=x.dtype) * t_scalar
 
 def reverse_sde(state, sample_data, key, dt:float = 1e-2, xi: float = 1.0, t: float = 1.0):
   """
@@ -41,31 +51,81 @@ def euler_murayama(key, t, state, trajectory, xi: float = 1.0, dt: float = 1e-2,
   return trajectory
 
 def compose_and_estimate_log_likelihood_along_superposed_trajectory(state_a, state_b, key, dt:float = 1e-2, t: float = 1.0, shape: Tuple[int, int] = (512, 2)):
-    datapoints, coordinates = shape
-    num_timesteps = int(t / dt) + 1  # time index i = 0, 1, .... n (include start and 100 steps)
-    t = t * jnp.ones((datapoints, 1))  # Broadcasted time vector per particle (starts at 1)
-    key, subkey = random.split(key, num=2)
-    trajectory_field = jnp.zeros((datapoints, num_timesteps, coordinates))  # Storage for whole trajectory
-    pure_noise = random.normal(subkey, shape=(datapoints, coordinates))
-    trajectory_field = trajectory_field.at[:, 0, :].set(pure_noise)
-    trajectory, log_likelihood_model_a, log_likelihood_model_b = ito_dynamic_estimator_solver(key, t, state_a, state_b, trajectory_field, dt=dt, num_timesteps=num_timesteps,  shape=shape)
-    return trajectory, log_likelihood_model_a, log_likelihood_model_b
+    assert len(shape) >= 2, "shape must be (N, ...)"
+    datapoints = shape[0]
+    data_dims = shape[1:]
+    num_coords = int(np.prod(data_dims))  # pass to dlogqdt
+    num_timesteps = int(t / dt) + 1
+    t_array = _broadcast_time(jnp.asarray(t, dtype=jnp.float32), jnp.zeros(shape, dtype=jnp.float32))
 
-def ito_dynamic_estimator_solver(key, t, state_a, state_b, trajectory, dt: float = 1e-2, num_timesteps: int=100,  shape: Tuple[int,int] = (512, 2)):
-    datapoints, coordinates = shape
-    log_likelihood_model_a = np.zeros((datapoints, num_timesteps))
-    log_likelihood_model_b = np.zeros((datapoints, num_timesteps))
-    for timestep in trange(num_timesteps-1):
-        x_t = trajectory[:, timestep, :]
+    key, subkey = random.split(key, num=2)
+    trajectory = jnp.zeros((datapoints, num_timesteps) + data_dims, dtype=jnp.float32)
+    pure_noise = random.normal(subkey, shape=(datapoints,) + data_dims)
+    trajectory = trajectory.at[:, 0, ...].set(pure_noise)
+    trajectory, lla, llb = ito_dynamic_estimator_solver(
+        key, t_array, state_a, state_b, trajectory,
+        dt=dt, num_timesteps=num_timesteps, data_dims=data_dims, num_coords=num_coords
+    )
+    return trajectory, lla, llb
+
+def ito_dynamic_estimator_solver(
+        key,
+        t,
+        state_a,
+        state_b,
+        trajectory,
+        dt: float = 1e-2,
+        num_timesteps: int = 100,
+        data_dims: Tuple[int, ...] = (2,),
+        num_coords: int = 2,
+    ):
+    """
+    Integrate the reverse probability-flow ODE with the **superposed** drift:
+      x' = dlog_alphadt(t) * x - beta(t) * ( s_b + κ (s_a - s_b) )
+    and accumulate log-likelihoods for model A and B via instantaneous CoV.
+
+    Args:
+      t            : (N, 1[,1,1...]) broadcastable time tensor
+      trajectory   : (N, T, *data_dims)
+      data_dims    : tuple of sample dimensions (e.g., (H,W,1))
+      num_coords   : H*W*C (or 2 for vectors)
+
+    Returns:
+      trajectory   : updated in-place
+      loglik_a/b   : (N, T) arrays
+    """
+    N = trajectory.shape[0]
+    log_likelihood_model_a = np.zeros((N, num_timesteps), dtype=np.float32)
+    log_likelihood_model_b = np.zeros((N, num_timesteps), dtype=np.float32)
+
+    for timestep in trange(num_timesteps - 1, desc="compose-ito"):
+        x_t = trajectory[:, timestep, ...]
         key, subkey = random.split(key, 2)
-        score_model_a, score_divergence_model_a = score_function_hutchinson_estimator(key, t, state_a, x_t)
-        score_model_b, score_divergence_model_b = score_function_hutchinson_estimator(key, t, state_b, x_t)
-        kappa = get_kappa(t, (score_divergence_model_a, score_divergence_model_b), (score_model_a, score_model_b))
-        reverse_drift_ode = dlog_alphadt(t)*x_t - beta(t)*(score_model_b + kappa*(score_model_a-score_model_b))
-        trajectory = trajectory.at[:, timestep + 1, :].set(x_t -  dt*reverse_drift_ode)  # Take a step
-        log_likelihood_model_a[:,timestep+1] = log_likelihood_model_a[:,timestep] - dt*dlogqdt(t, x_t, score_model_a, score_divergence_model_a, reverse_drift_ode).squeeze()
-        log_likelihood_model_b[:,timestep+1] = log_likelihood_model_b[:,timestep] - dt*dlogqdt(t, x_t, score_model_b, score_divergence_model_b, reverse_drift_ode).squeeze()
-        t += -dt
+
+        # score + divergence for both models at (t, x_t)
+        score_a, div_a = score_function_hutchinson_estimator(subkey, t, state_a, x_t)
+        key, subkey = random.split(key, 2)
+        score_b, div_b = score_function_hutchinson_estimator(subkey, t, state_b, x_t)
+
+        # κ(t, x_t) (shape (N,1[,1,1...]) broadcastable over x)
+        kappa = get_kappa(t, (div_a, div_b), (score_a, score_b))
+
+        # reverse PF ODE drift with superposition (no noise)
+        reverse_drift_ode = dlog_alphadt(t) * x_t - beta(t) * (score_b + kappa * (score_a - score_b))
+
+        # one deterministic step backward in time
+        x_next = x_t - dt * reverse_drift_ode
+        trajectory = trajectory.at[:, timestep + 1, ...].set(x_next)
+
+        # per-model log-likelihood increments (Eq.10; pass num_coords)
+        lla = dlogqdt(t, x_t, score_a, div_a, reverse_drift_ode, ndim=num_coords).reshape(N)
+        llb = dlogqdt(t, x_t, score_b, div_b, reverse_drift_ode, ndim=num_coords).reshape(N)
+        log_likelihood_model_a[:, timestep + 1] = log_likelihood_model_a[:, timestep] - float(dt) * np.asarray(lla)
+        log_likelihood_model_b[:, timestep + 1] = log_likelihood_model_b[:, timestep] - float(dt) * np.asarray(llb)
+
+        # step time backward
+        t = t - dt
+
     return trajectory, log_likelihood_model_a, log_likelihood_model_b
 
 
