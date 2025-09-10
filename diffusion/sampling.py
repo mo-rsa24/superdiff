@@ -91,7 +91,6 @@ def Euler_Maruyama_sampler(rng, score_model, params, marginal_prob_std, diffusio
             f"sample_batch_size ({batch_size}) must be divisible by local_device_count ({devices}). "
             "Choose a multiple to avoid degenerate sampling.")
     pmap_score_fn = make_pmap_score_fn(score_model)
-
     time_shape   = (devices, batch_size // devices)
     sample_shape = time_shape + (img_size, img_size, 1)
     rng, step_rng = jax.random.split(rng)

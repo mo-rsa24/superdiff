@@ -424,7 +424,7 @@ def main():
         # --- Periodic sampling ---
         if ((epoch + 1) % max(1, args.sample_every)) == 0:
             params_for_sampling = ema_params if args.use_ema_for_sampling else host_params_last
-            images, eval_dict = sample_and_log(
+            images, eval_dict, rng  = sample_and_log(
                 rng_key=rng,
                 score_model=score_model,
                 params=params_for_sampling,
