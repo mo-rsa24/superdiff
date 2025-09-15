@@ -1,26 +1,8 @@
-#!/usr/bin/env python3
-"""
-Standalone investigation tool for repeated samples in grids.
-
-What it does:
-  • Loads a trained run from runs/<exp>/<ts>/ (reads run_meta.json when present).
-  • Reuses cxr.sample_and_log() to render/save the same grid(s) as training.
-  • Independently re-runs the sampler once (same logic as sample_and_log) to
-    obtain the raw batch and checks for duplicates (exact byte equality after
-    visualization mapping), printing grouped indices.
-
-This keeps everything simple & faithful to cxr.py while giving you clear evidence.
-"""
-
 import argparse, os, json, hashlib, math
 import numpy as np
 import jax
 import jax.numpy as jnp
 import tensorflow as tf
-
-# --- import your code ---
-# We rely on exactly the same helpers your trainer uses.
-from cxr import sample_and_log, make_grid_torch, ensure_dir  # reuse logging helper & grid builder  :contentReference[oaicite:4]{index=4}
 from diffusion.equations import marginal_prob_std as ve_marginal_prob_std, diffusion_coeff as ve_diffusion_coeff
 from diffusion.sampling import pc_sampler, Euler_Maruyama_sampler, ode_sampler
 from models.cxr_unet import ScoreNet
@@ -28,10 +10,14 @@ from flax.training.train_state import TrainState
 from flax.serialization import from_bytes
 import optax
 import torch
+import os
 
-# --------------------------
-# Utilities
-# --------------------------
+from run.cxr import ensure_dir, sample_and_log
+
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+gpus = tf.config.list_physical_devices("GPU")
+for g in gpus:
+    tf.config.experimental.set_memory_growth(g, True)
 
 def to_uint8_vis(x: np.ndarray) -> np.ndarray:
     """
@@ -67,7 +53,7 @@ def load_run_meta(run_dir: str):
     return {}
 
 def infer_ckpt_path(run_dir: str):
-    ckpt_path = os.path.join(run_dir, "ckpts", "last.flax")
+    ckpt_path = os.path.join(run_dir, "ckpts", "ep0003.flax")
     if not tf.io.gfile.exists(ckpt_path):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     return ckpt_path
@@ -85,8 +71,12 @@ def build_model(img_size: int, channels: str, embed_dim: int, batch_size: int):
     score_model = ScoreNet(ve_marginal_prob_std, channels=chans, embed_dim=int(embed_dim))
     fake_x = jnp.ones((batch_size, img_size, img_size, 1), dtype=jnp.float32)
     fake_t = jnp.ones((batch_size,), dtype=jnp.float32)
-    params = score_model.init({'params': jax.random.PRNGKey(0)}, fake_x, fake_t)
+    # params = score_model.init({'params': jax.random.PRNGKey(0)}, fake_x, fake_t)
     # create a minimal TrainState like in training (optimizer isn't used here) :contentReference[oaicite:6]{index=6}
+    cpu = jax.devices("cpu")[0]
+    with jax.default_device(cpu):
+        params = score_model.init({'params': jax.random.PRNGKey(0)}, fake_x, fake_t)
+    params = jax.device_put(params, jax.devices("gpu")[0])
     tx = optax.adamw(learning_rate=1e-3)
     host_state = TrainState.create(apply_fn=score_model.apply, params=params, tx=tx)
     return score_model, host_state
@@ -253,7 +243,6 @@ def main():
         print(f"[warn] torchvision save failed (ok to ignore): {e}")
 
     print("[done] Investigated duplicates. See printed groups and images in:", out_dir)
-
 
 if __name__ == "__main__":
     main()
