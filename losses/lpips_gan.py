@@ -100,7 +100,8 @@ class LPIPSWithDiscriminatorJAX(nn.Module):
         rec = self._pixel_loss(x_in, x_rec)  # (N,)
         nll_per = rec / jnp.exp(self.logvar) + self.logvar
         nll = jnp.mean(nll_per)            # scalar
-        kl = jnp.mean(posterior.kl())      # scalar
+        kl = jnp.array(0.0) if (posterior is None) else jnp.mean(posterior.kl())
+        # kl = jnp.mean(posterior.kl())      # scalar
 
         # generator loss (GAN)
         d_logits_fake = self.discriminator(x_rec, train=train)

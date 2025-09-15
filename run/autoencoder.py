@@ -140,7 +140,9 @@ def main():
     variables = ae.init({'params': rng, 'dropout': rng}, fake, rng=rng, sample_posterior=True, train=True)
     params = variables['params']
 
-    loss_vars = loss_mod.init({'params': rng}, x_in=fake, x_rec=fake, posterior=None, step=jnp.array(0), train=True)
+    # loss_vars = loss_mod.init({'params': rng}, x_in=fake, x_rec=fake, posterior=None, step=jnp.array(0), train=True)
+    fake_loss = jnp.ones((1, 32, 32, 1), dtype=jnp.float32)  # tiny tensor for safe init
+    loss_vars = loss_mod.init({'params': rng}, x_in = fake_loss, x_rec = fake_loss, posterior = None, step = jnp.array(0), train = True)
     loss_params = loss_vars['params']
 
     # two optimizers (generator vs discriminator) like LDM
