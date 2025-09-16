@@ -1,4 +1,4 @@
-import argparse, os, json, hashlib, math
+import argparse, os, json, hashlib, math, functools
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -11,7 +11,7 @@ from flax.serialization import from_bytes
 import optax
 import torch
 import os
-
+from typing import Tuple
 from run.cxr import ensure_dir, sample_and_log
 
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
@@ -62,13 +62,15 @@ def infer_ckpt_path(run_dir: str):
 # Minimal model + ckpt load
 # --------------------------
 
-def build_model(img_size: int, channels: str, embed_dim: int, batch_size: int):
+def build_model(img_size: int, channels: str, embed_dim: int, batch_size: int, sigma_max: float):
     """
     Mirror your trainer’s model init (ScoreNet(marginal_prob_std), fake_x/t) so
     restored params match shapes. :contentReference[oaicite:5]{index=5}
     """
     chans = tuple(int(c) for c in channels.split(",")) if isinstance(channels, str) else tuple(channels)
-    score_model = ScoreNet(ve_marginal_prob_std, channels=chans, embed_dim=int(embed_dim))
+    mpstd = functools.partial(ve_marginal_prob_std, sigma=float(sigma_max))
+    score_model = ScoreNet(mpstd, channels=chans, embed_dim=int(embed_dim))
+    # score_model = ScoreNet(ve_marginal_prob_std, channels=chans, embed_dim=int(embed_dim))
     fake_x = jnp.ones((batch_size, img_size, img_size, 1), dtype=jnp.float32)
     fake_t = jnp.ones((batch_size,), dtype=jnp.float32)
     # params = score_model.init({'params': jax.random.PRNGKey(0)}, fake_x, fake_t)
@@ -112,24 +114,26 @@ def restore_params_from_ckpt(host_state: TrainState, ckpt_path: str):
 # --------------------------
 
 def run_sampler_once(*, rng_key, score_model, params, img_size: int, batch_size: int,
-                     sampler_name: str, num_steps: int, snr: float, eps: float,
-                     epoch: int):
+                    sampler_name: str, num_steps: int, snr: float, eps: float,
+                     epoch: int, sigma_max: float):
     """
     This mirrors cxr.sample_and_log: select sampler, fold_in(epoch), split(key),
     run sampler, clip to [0,1], and reshape to (B,H,W,1). :contentReference[oaicite:8]{index=8} :contentReference[oaicite:9]{index=9}
     """
+    mpstd = functools.partial(ve_marginal_prob_std, sigma=float(sigma_max))
+    dcoeff = functools.partial(ve_diffusion_coeff, sigma=float(sigma_max))
     sampler_name = (sampler_name or "pc").lower()
     if sampler_name in ("pc", "predictor-corrector"):
         def _run(rng):
-            return pc_sampler(rng, score_model, params, ve_marginal_prob_std, ve_diffusion_coeff,
+            return pc_sampler(rng, score_model, params, mpstd, dcoeff,
                               batch_size=batch_size, img_size=img_size, num_steps=num_steps, snr=snr, eps=eps)
     elif sampler_name in ("em", "euler", "euler-maruyama"):
         def _run(rng):
-            return Euler_Maruyama_sampler(rng, score_model, params, ve_marginal_prob_std, ve_diffusion_coeff,
+            return Euler_Maruyama_sampler(rng, score_model, params, mpstd, dcoeff,
                                           batch_size=batch_size, num_steps=num_steps, eps=eps, img_size=img_size)
     elif sampler_name in ("ode", "pf-ode", "probability-flow-ode"):
         def _run(rng):
-            return ode_sampler(rng, score_model, params, ve_marginal_prob_std, ve_diffusion_coeff,
+            return ode_sampler(rng, score_model, params, mpstd, dcoeff,
                                batch_size=batch_size, img_size=img_size, eps=eps)
     else:
         raise ValueError(f"Unknown sampler: {sampler_name}")
@@ -150,6 +154,8 @@ def run_sampler_once(*, rng_key, score_model, params, img_size: int, batch_size:
 def parse_args():
     ap = argparse.ArgumentParser("Investigate repeats in sampling/logging (standalone)")
     ap.add_argument("--run_dir", required=True, help="Path to a finished training run (folder with ckpts/ & run_meta.json)")
+    ap.add_argument("--sigma_max", type=float, default=25.0,
+                    help="VE sigma_max (used to wrap VE functions like in training)")
     ap.add_argument("--ckpt_path", default=None, help="Override checkpoint path (else uses run_dir/ckpts/last.flax)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--epoch", type=int, default=1, help="Epoch number to fold into RNG (matches training logging).")
@@ -181,17 +187,19 @@ def main():
     sampler   = meta.get("sampler", args.sampler)
     num_steps = int(meta.get("num_steps", args.num_steps))
     snr       = float(meta.get("snr", args.snr))
+    sigma_max = float(meta.get("sigma_max", args.sigma_max))
     eps       = float(meta.get("eps", args.eps))
 
     ckpt_path = args.ckpt_path or infer_ckpt_path(args.run_dir)
 
     print(f"[meta] img_size={img_size}  sample_batch_size={bsamp}  channels={channels}  "
           f"embed_dim={embed_dim}  sampler={sampler}  num_steps={num_steps}  snr={snr}  eps={eps}")
-    print(f"[meta] run_dir={args.run_dir}")
+    print(f"[meta] sigma_max={sigma_max}  run_dir={args.run_dir}  ckpt_path={ckpt_path}")
     print(f"[ckpt] using {ckpt_path}")
 
     # Build model & restore params (EMA if available), exactly like the trainer :contentReference[oaicite:11]{index=11}
-    score_model, host_state = build_model(img_size, channels, embed_dim, bsamp)
+    # score_model, host_state = build_model(img_size, channels, embed_dim, bsamp)
+    score_model, host_state = build_model(img_size, channels, embed_dim, bsamp, sigma_max)
     host_state, ema_or_params = restore_params_from_ckpt(host_state, ckpt_path)
 
     # 1) Reuse your cxr.sample_and_log to save the grid(s) exactly as training does. :contentReference[oaicite:12]{index=12}
