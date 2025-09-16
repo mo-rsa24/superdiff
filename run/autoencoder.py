@@ -141,10 +141,13 @@ def main():
             self.length = int(length)
         def __len__(self): return self.length
         def __getitem__(self, idx): return self.x, self.y
+
     if args.overfit_one:
-        one_item = base_ds[0]
-        ds = RepeatOne(one_item, args.repeat_len)
-        shuffle = False
+        batch_size = per_dev * ndev
+        indices = list(range(batch_size))
+        ds = Subset(base_ds, indices)
+        ds = torch.utils.data.ConcatDataset([ds] * (args.repeat_len // batch_size))
+        shuffle = True
         drop_last = True
     elif args.overfit_k > 0:
         idxs = list(range(min(args.overfit_k, len(base_ds))))
@@ -256,9 +259,11 @@ def main():
     for ep in tqdm.trange(args.epochs, desc="epochs"):
         inner = tqdm.tqdm(loader, desc=f"epoch {ep+1}/{args.epochs}", leave=False)
         for step_i, (batch, _) in enumerate(inner):
-            x = batch.permute(0,2,3,1).contiguous()  # N,H,W,1 in [-1,1]
-            x = (x + 1.0) * 0.5
-            x = jnp.asarray(x.numpy())
+            # Convert to JAX/NumPy array first
+            x = jnp.asarray(batch.numpy())
+            # Permute and normalize in JAX
+            x = jnp.transpose(x, (0, 2, 3, 1))  # N, C, H, W -> N, H, W, C
+            x = (x + 1.0) * 0.5  # [-1, 1] -> [0,
 
             gen_state, logs_g, xrec, posterior = gen_step(gen_state, disc_state, x, global_step)
             disc_state, logs_d = disc_step(gen_state.params, disc_state, x, global_step)
