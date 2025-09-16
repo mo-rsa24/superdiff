@@ -10,7 +10,7 @@ import optax
 import tensorflow as tf
 import tqdm
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, Subset
 from flax.training.train_state import TrainState
 from flax.serialization import to_bytes, from_bytes
 
@@ -47,6 +47,12 @@ def parse_args():
     p.add_argument("--split", choices=["train","val","test"], default="train")
     p.add_argument("--img_size", type=int, default=256)
     p.add_argument("--class_filter", type=int, default=1)
+    p.add_argument("--overfit_one", action="store_true",
+                                       help = "Repeat a single sample to overfit the AE.")
+    p.add_argument("--overfit_k", type=int, default=0,
+                                       help = "If >0, train on a fixed tiny subset of size K.")
+    p.add_argument("--repeat_len", type=int, default=16384,
+                                       help = "Virtual length for the repeated one-sample dataset.")
 
     # Model arch (no YAML)
     p.add_argument("--ch_mults", type=str, default="128,256,512")
@@ -102,7 +108,18 @@ def main():
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     ch_mults = tuple(int(c.strip()) for c in args.ch_mults.split(",") if c.strip())
-    exp_slug = f"{args.exp_name}-{args.task.lower()}-{args.split}-cxr{H}-ch{'x'.join(map(str,ch_mults))}-z{args.z_channels}-lr{args.lr:g}-b{per_dev}x{ndev}"
+    mode = "full"
+    if args.overfit_one:
+        mode = "of1"
+    elif args.overfit_k > 0:
+        mode = f"tiny{args.overfit_k}"
+    exp_slug = (
+       f"{args.exp_name}"
+       f"-{args.task.lower()}-{args.split}"
+       f"-cxr{H}-{mode}"
+       f"-ch{'x'.join(map(str, ch_mults))}"
+       f"-z{args.z_channels}"
+       f"-lr{args.lr:g}-b{per_dev}x{ndev}")
     run_dir = args.resume_dir if args.resume_dir else os.path.join(args.output_root, args.run_name or exp_slug, ts)
     ckpt_dir = ensure_dir(os.path.join(run_dir, "ckpts"))
     samples_dir = ensure_dir(os.path.join(run_dir, "samples"))
@@ -113,13 +130,33 @@ def main():
         json.dump({**vars(args), "run_dir": run_dir, "ckpt_latest": ckpt_latest}, f, indent=2)
 
     # ----- dataset -----
-    ds = ChestXrayDataset(
+    base_ds = ChestXrayDataset(
         root_dir=args.data_root, task=args.task, split=args.split,
         img_size=args.img_size, class_filter=args.class_filter
     )
-    label_counts = Counter(ds.labels)
+    class RepeatOne(Dataset):
+        def __init__(self, item, length: int):
+            self.x, self.y = item
+            self.length = int(length)
+        def __len__(self): return self.length
+        def __getitem__(self, idx): return self.x, self.y
+    if args.overfit_one:
+        one_item = base_ds[0]
+        ds = RepeatOne(one_item, args.repeat_len)
+        shuffle = False
+        drop_last = True
+    elif args.overfit_k > 0:
+        idxs = list(range(min(args.overfit_k, len(base_ds))))
+        ds = Subset(base_ds, idxs)
+        shuffle = True
+        drop_last = True
+    else:
+        ds = base_ds
+        shuffle = True
+        drop_last = True
     batch_size = per_dev * ndev
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=True)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
+                                         num_workers = 8, drop_last = drop_last, pin_memory = True)
 
     # ----- model -----
     enc_cfg = dict(ch_mults = ch_mults,
@@ -219,7 +256,7 @@ def main():
         inner = tqdm.tqdm(loader, desc=f"epoch {ep+1}/{args.epochs}", leave=False)
         for batch, _ in inner:
             x = batch.permute(0,2,3,1).contiguous()  # N,H,W,1 in [-1,1]
-            x = (x + 1.0) * 0.5                       # -> [0,1]
+            x = (x 1.0) * 0.5                       # -> [0,1]
             x = jnp.asarray(x.numpy())
 
             gen_state, logs_g, xrec, posterior = gen_step(gen_state, disc_state, x, global_step)

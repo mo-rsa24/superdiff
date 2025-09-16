@@ -18,10 +18,10 @@ class NLayerDiscriminator(nn.Module):
         for i in range(1, self.n_layers):
             mult = min(2**i, 8)
             h = nn.Conv(ch*mult, (4,4), strides=(2,2), padding="SAME")(h)
-            h = nn.BatchNorm(use_running_average=not train)(h)
+            h = nn.GroupNorm(num_groups=32)(h)
             h = nn.leaky_relu(h, 0.2)
         h = nn.Conv(ch*8, (4,4), padding="SAME")(h)
-        h = nn.BatchNorm(use_running_average=not train)(h)
+        h = nn.GroupNorm(num_groups=32)(h)
         h = nn.leaky_relu(h, 0.2)
         h = nn.Conv(1, (4,4), padding="SAME")(h)
         return h  # (N,H',W',1) logits
