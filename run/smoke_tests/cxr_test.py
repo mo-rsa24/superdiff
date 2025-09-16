@@ -141,10 +141,8 @@ def run_sampler_once(*, rng_key, score_model, params, img_size: int, batch_size:
     # Important: same RNG handling as in cxr.sample_and_log (fold_in + split) :contentReference[oaicite:10]{index=10}
     rng_key = jax.random.fold_in(rng_key, int(epoch))
     rng_key, step_rng = jax.random.split(rng_key)
-
-    samples = _run(step_rng)                          # (B,H,W,1) in [0,1]
-    samples = jnp.clip(samples, 0.0, 1.0)
-    samples = np.asarray(samples)                     # JAX -> NumPy
+    samples = _run(step_rng)  # (B,H,W,1) in [0,1]
+    samples = np.asarray(jnp.clip(samples, 0.0, 1.0))
     return samples, rng_key
 
 # --------------------------
