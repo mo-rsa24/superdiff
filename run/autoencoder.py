@@ -134,6 +134,7 @@ def main():
         root_dir=args.data_root, task=args.task, split=args.split,
         img_size=args.img_size, class_filter=args.class_filter
     )
+    label_counts = Counter(base_ds.labels)
     class RepeatOne(Dataset):
         def __init__(self, item, length: int):
             self.x, self.y = item
@@ -254,9 +255,9 @@ def main():
     global_step = 0
     for ep in tqdm.trange(args.epochs, desc="epochs"):
         inner = tqdm.tqdm(loader, desc=f"epoch {ep+1}/{args.epochs}", leave=False)
-        for batch, _ in inner:
+        for step_i, (batch, _) in enumerate(inner):
             x = batch.permute(0,2,3,1).contiguous()  # N,H,W,1 in [-1,1]
-            x = (x 1.0) * 0.5                       # -> [0,1]
+            x = (x + 1.0) * 0.5
             x = jnp.asarray(x.numpy())
 
             gen_state, logs_g, xrec, posterior = gen_step(gen_state, disc_state, x, global_step)
