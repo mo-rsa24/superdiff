@@ -17,7 +17,7 @@ export TASK="TB"                         # Set the dataset task (TB or PNEUMONIA
 export EPOCHS=50                        # Set a higher number of epochs for a full run
 export BATCH_PER_DEVICE=8                # Adjust batch size based on your GPU memory
 export SAMPLE_EVERY=5                    # Sample every 5 epochs to save disk space
-export WANDB_TAGS="full-train:slurm"     # Set W&B tags (use colons to separate)
+export WANDB_TAGS="ae-full-train:slurm"     # Set W&B tags (use colons to separate)
 
 # ----------------------------------------------------------------
 #                🚀 --- JOB LAUNCH LOGIC --- 🚀
@@ -27,7 +27,7 @@ export OVERFIT_ONE=0  # Set to 0 to turn OFF overfitting
 export OVERFIT_K=0    # Set to 0 to turn OFF tiny-K subset training
 
 # Create a descriptive name for the experiment run
-export RUN_NAME="full_${TASK,,}_b${BATCH_PER_DEVICE}_$(date +%Y%m%d)"
+export RUN_NAME="ae_full_${TASK,,}_b${BATCH_PER_DEVICE}_$(date +%Y%m%d)"
 
 # --- Submit to Slurm ---
 echo "Submitting SLURM job for a FULL TRAINING run..."
