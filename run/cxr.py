@@ -23,8 +23,9 @@ from datasets.ChestXRay import ChestXrayDataset
 # VE schedule always exists; VPSDE is optional (we try-import below)
 from diffusion.equations import marginal_prob_std, diffusion_coeff  # VE  :contentReference[oaicite:5]{index=5}
 from diffusion.sampling import (
-    ode_sampler, Euler_Maruyama_sampler, pc_sampler                  #     :contentReference[oaicite:6]{index=6}
+    ode_sampler, Euler_Maruyama_sampler, pc_sampler, Euler_Maruyama_debugger
 )
+
 from models.cxr_unet import ScoreNet                                 #     :contentReference[oaicite:7]{index=7}
 from train.train_score_sde import get_train_step_fn                  #     :contentReference[oaicite:8]{index=8}
 
@@ -101,6 +102,11 @@ def parse_args():
     p.add_argument("--num_steps", type=int, default=500)
     p.add_argument("--snr", type=float, default=0.16, help="SNR for Langevin corrector (PC)")
     p.add_argument("--eps", type=float, default=1e-3, help="Final time for samplers")
+    p.add_argument("--sampler_noise_scale", type=float, default=1.0, help="Scale factor for sampler noise term.")
+    p.add_argument("--sampler_add_final_noise", action="store_true",
+                   help="If set, adds noise in the very last sampler step.")
+    p.add_argument("--debug_sampler", action="store_true",
+                   help="If set, runs a special sampler that saves intermediate steps to visualize convergence.")
 
     # Optimizer / schedule / hygiene
     p.add_argument("--lr", type=float, default=2e-4)
@@ -424,21 +430,16 @@ def main():
         # --- Periodic sampling ---
         if ((epoch + 1) % max(1, args.sample_every)) == 0:
             params_for_sampling = ema_params if args.use_ema_for_sampling else host_params_last
-            images, eval_dict, rng  = sample_and_log(
+            images, eval_dict, rng = sample_and_log(
                 rng_key=rng,
                 score_model=score_model,
                 params=params_for_sampling,
                 H=H, W=W, img_size=args.img_size,
                 batch_size=args.sample_batch_size,
                 out_dir=samples_dir,
-                epoch=epoch+1,
+                epoch=epoch + 1,
                 target_np=target_np,
-                sampler_name=args.sampler,
-                num_steps=args.num_steps,
-                snr=args.snr,
-                eps=args.eps,
-                marginal_prob_std_fn=marginal_prob_std_fn,
-                diffusion_coeff_fn=diffusion_coeff_fn,
+                args=args,
             )
             if use_wandb:
                 wandb_imgs = [wandb.Image(img, caption=cap) for cap, img in images]
@@ -452,29 +453,54 @@ def main():
 
 
 # ---------------- Sampling helper ----------------
-
 def sample_and_log(rng_key,
                    score_model,
                    params,
                    H, W, img_size, batch_size,
-                   out_dir, epoch, target_np=None,
-                   sampler_name="pc", num_steps=500, snr=0.16, eps=1e-3,
-                   marginal_prob_std_fn=None, diffusion_coeff_fn=None):
+                   out_dir, epoch, target_np, args):
     """Returns (images_to_log, eval_metrics) where images_to_log is a list of (caption, image-array)."""
     import matplotlib.pyplot as plt
     from torchvision.utils import save_image
 
     # Choose sampler
-    sampler_name = (sampler_name or "pc").lower()
+    sampler_name = (args.sampler or "pc").lower()
+    num_steps = args.num_steps
+    snr = args.snr
+    eps = args.eps
+    noise_scale = args.sampler_noise_scale
+    add_final_noise = args.sampler_add_final_noise
+    marginal_prob_std_fn = score_model.marginal_prob_std
+    from diffusion.equations import diffusion_coeff, vpsde_diffusion_coeff
+    if args.sde == "VE":
+        sigma = float(args.sigma_max)
+        diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma)
+    else:
+        diffusion_coeff_fn = vpsde_diffusion_coeff
+    if args.debug_sampler:
+        print("[info] Running in debug sampler mode. This will be slow and save many images.")
+        rng_key = jax.random.fold_in(rng_key, int(epoch))
+        rng_key, step_rng = jax.random.split(rng_key)
+        samples = Euler_Maruyama_debugger(
+            step_rng, score_model, params, marginal_prob_std_fn, diffusion_coeff_fn,
+            batch_size=batch_size, img_size=img_size, num_steps=num_steps,
+            out_dir=out_dir, epoch=epoch + 1
+        )
+        # The debug sampler already saves its output, but we return the final grid for logging
+        eval_metrics = {}
+        grid = make_grid_torch(torch.tensor(np.asarray(samples)).reshape(-1, 1, H, W))
+        grid_np = np.clip(grid.permute(1, 2, 0).numpy(), 0.0, 1.0)
+        return [("final_debug_sample_grid", grid_np)], eval_metrics, rng_key
+
     if sampler_name in ("pc", "predictor-corrector"):
         def _run(rng):
             return pc_sampler(rng, score_model, params, marginal_prob_std_fn, diffusion_coeff_fn,
                               batch_size=batch_size, img_size=img_size, num_steps=num_steps,
-                              snr=snr, eps=eps)
+                              snr=snr, eps=eps, noise_scale=noise_scale, add_final_noise=add_final_noise)
     elif sampler_name in ("em", "euler", "euler-maruyama"):
         def _run(rng):
             return Euler_Maruyama_sampler(rng, score_model, params, marginal_prob_std_fn, diffusion_coeff_fn,
-                                          batch_size=batch_size, num_steps=num_steps, eps=eps, img_size=img_size)
+                                          batch_size=batch_size, num_steps=num_steps, eps=eps, img_size=img_size,
+                                          noise_scale=noise_scale, add_final_noise=add_final_noise)
     elif sampler_name in ("ode", "pf-ode", "probability-flow-ode"):
         def _run(rng):
             return ode_sampler(rng, score_model, params, marginal_prob_std_fn, diffusion_coeff_fn,

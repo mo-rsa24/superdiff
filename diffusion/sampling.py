@@ -7,6 +7,9 @@ import tqdm
 import math
 from diffusion.equations import diffusion, drift, score_function_hutchinson_estimator, get_kappa, dlog_alphadt, beta, \
     dlogqdt
+import os
+from torchvision.utils import save_image
+import torch
 
 
 def reverse_sde(state, sample_data, key, dt:float = 1e-2, xi: float = 1.0, t: float = 1.0):
@@ -84,7 +87,8 @@ def make_pmap_score_fn(score_model):
     return jax.pmap(score_fn, in_axes=(None, 0, 0))
 
 def Euler_Maruyama_sampler(rng, score_model, params, marginal_prob_std, diffusion_coeff,
-                           batch_size=64, num_steps=num_steps, eps=1e-3, img_size=28):
+                           batch_size=64, num_steps=num_steps, eps=1e-3, img_size=28,
+                           noise_scale=1.0, add_final_noise=False):
     devices = jax.local_device_count()
     if batch_size % devices != 0:
         raise ValueError(
@@ -103,8 +107,15 @@ def Euler_Maruyama_sampler(rng, score_model, params, marginal_prob_std, diffusio
         g = diffusion_coeff(time_step)
         mean_x = x + (g ** 2) * pmap_score_fn(params, x, batch_time_step) * step_size
         rng, step_rng = jax.random.split(rng)
-        x = mean_x + jnp.sqrt(step_size) * g * jax.random.normal(step_rng, x.shape)
-    return mean_x
+        noise = jax.random.normal(step_rng, x.shape)
+        x = mean_x + jnp.sqrt(step_size) * g * noise * noise_scale
+    if add_final_noise:
+        rng, step_rng = jax.random.split(rng)
+        g = diffusion_coeff(eps)
+        noise = jax.random.normal(step_rng, mean_x.shape)
+        return mean_x + jnp.sqrt(step_size) * g * noise * noise_scale
+    else:
+        return mean_x
 
 
 
@@ -124,27 +135,9 @@ def pc_sampler(rng,
                batch_size=64,
                img_size=28,
                num_steps=num_steps,
-               snr=signal_to_noise_ratio,
-               eps=1e-3):
-    """Generate samples from score-based models with Predictor-Corrector method.
-
-    Args:
-      rng: A JAX random state.
-      score_model: A `flax.linen.Module` that represents the
-        architecture of the score-based model.
-      params: A dictionary that contains the parameters of the score-based model.
-      marginal_prob_std: A function that gives the standard deviation
-        of the perturbation kernel.
-      diffusion_coeff: A function that gives the diffusion coefficient
-        of the SDE.
-      batch_size: The number of samplers to generate by calling this function once.
-      num_steps: The number of sampling steps.
-        Equivalent to the number of discretized time steps.
-      eps: The smallest time step for numerical stability.
-
-    Returns:
-      Samples.
-    """
+               snr=0.16,
+               eps=1e-3,
+               noise_scale=1.0, add_final_noise=False): # <<< MODIFIED >>>
     devices = jax.local_device_count()
     pmap_score_fn = make_pmap_score_fn(score_model)
     time_shape = (devices, batch_size // devices)
@@ -159,7 +152,7 @@ def pc_sampler(rng,
     time_steps = jnp.linspace(1., eps, num_steps)
     step_size = time_steps[0] - time_steps[1]
     x = init_x
-    for time_step in tqdm.tqdm(time_steps):
+    for time_step in tqdm.tqdm(time_steps, desc="Predictor-Corrector"): # <<< MODIFIED >>>
         batch_time_step = jnp.ones(time_shape) * time_step
         # Corrector step (Langevin MCMC)
         grad = pmap_score_fn(params, x, batch_time_step)
@@ -169,20 +162,62 @@ def pc_sampler(rng,
         langevin_step_size = 2 * (snr * noise_norm / grad_norm) ** 2
         rng, step_rng = jax.random.split(rng)
         z = jax.random.normal(step_rng, x.shape)
-        x = x + langevin_step_size * grad + jnp.sqrt(2 * langevin_step_size) * z
-
+        x = x + langevin_step_size * grad + jnp.sqrt(2 * langevin_step_size) * z * noise_scale
         # Predictor step (Euler-Maruyama)
         g = diffusion_coeff(time_step)
         score = pmap_score_fn(params, x, batch_time_step)
         x_mean = x + (g ** 2) * score * step_size
         rng, step_rng = jax.random.split(rng)
         z = jax.random.normal(step_rng, x.shape)
-        x = x_mean + jnp.sqrt(g ** 2 * step_size) * z
+        x = x_mean + jnp.sqrt(g ** 2 * step_size) * z * noise_scale
+    if add_final_noise:
+        return x # x already has noise from the last step
+    else:
+        return x_mean
 
-        # The last step does not include any noise
-    return x_mean
 
+def Euler_Maruyama_debugger(rng, score_model, params, marginal_prob_std, diffusion_coeff,
+                            batch_size=64, num_steps=500, eps=1e-3, img_size=28,
+                            out_dir=".", epoch=0):
+    def _save_grid(x_state, step_idx):
+        """Helper to save a grid of samples at a given step."""
+        samples_t = torch.tensor(np.asarray(jnp.clip(x_state, 0.0, 1.0)))
+        samples_t = samples_t.reshape(-1, img_size, img_size, 1).permute(0, 3, 1, 2)
+        grid_path = os.path.join(out_dir, f"debug_epoch_{epoch:03d}_step_{step_idx:04d}.png")
+        save_image(samples_t, grid_path, nrow=int(math.sqrt(batch_size)))
+        print(f"[debug] Saved intermediate grid to {grid_path}")
 
+    devices = jax.local_device_count()
+    pmap_score_fn = make_pmap_score_fn(score_model)
+    time_shape = (devices, batch_size // devices)
+    sample_shape = time_shape + (img_size, img_size, 1)
+    rng, step_rng = jax.random.split(rng)
+
+    init_x = jax.random.normal(step_rng, sample_shape) * marginal_prob_std(1.)
+    # Denormalize initial noise to [0,1] for visualization, treating it like an image
+    init_x_vis = (init_x - jnp.min(init_x)) / (jnp.max(init_x) - jnp.min(init_x))
+    _save_grid(init_x_vis, 0)
+
+    time_steps = jnp.linspace(1., eps, num_steps)
+    step_size = time_steps[0] - time_steps[1]
+    x = init_x
+
+    # Save at 25%, 50%, 75%, 100%
+    save_points = {int(num_steps * p) for p in [0.25, 0.50, 0.75]}
+
+    for i, time_step in enumerate(tqdm.tqdm(time_steps, desc="Debug Sampler")):
+        batch_time_step = jnp.ones(time_shape) * time_step
+        g = diffusion_coeff(time_step)
+        mean_x = x + (g ** 2) * pmap_score_fn(params, x, batch_time_step) * step_size
+        rng, step_rng = jax.random.split(rng)
+        noise = jax.random.normal(step_rng, x.shape)
+        x = mean_x + jnp.sqrt(step_size) * g * noise
+
+        if i + 1 in save_points:
+            _save_grid(x, i + 1)
+
+    _save_grid(mean_x, num_steps)  # Save final deterministic state
+    return mean_x
 # @title Define the ODE sampler (double click to expand or collapse)
 
 from scipy import integrate
