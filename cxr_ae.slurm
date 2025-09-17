@@ -78,8 +78,8 @@ export JAX_PLATFORMS=cuda
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export TF_CPP_MIN_LOG_LEVEL=3
 source ~/.bashrc
-mamba activate "$ENV_NAME"
-ok "Activated micromamba: $ENV_NAME"
+mamba activate jax115
+ok "Activated micromamba: jax115"
 
 # ----------------------------
 # Normalize list-like vars
