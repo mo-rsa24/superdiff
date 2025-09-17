@@ -10,7 +10,7 @@ set -euo pipefail
 #                ✅ --- USER CONFIGURATION --- ✅
 # ----------------------------------------------------------------
 # REQUIRED: Set the name of your conda or mamba environment
-export ENV_NAME="your_conda_env_name"
+export ENV_NAME="jax115"
 
 # --- Key Training Parameters ---
 export TASK="TB"                         # Set the dataset task (TB or PNEUMONIA)
