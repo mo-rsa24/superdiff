@@ -11,7 +11,8 @@ set -euo pipefail
 # ----------------------------
 # Pretty printing helpers
 # ----------------------------
-RED=$'\e[31m'; GRN=$'\e[32m'; YLW=$'\e[33m'; BLU=$'\e[34m'; MAG=$'\e[35m'; CYN=$'\e[36m'; BLD=$'\e[1m'; RST=$'\e[0m'
+RED=$'\e[31m'; GRN=$'\e[32m'; YLW=$'\e[33m'; BLU=$'\e[34m'; MAG=$'\e[35m'; CYN=$'\e[36m'; BLD=$'\e[1m';
+RST=$'\e[0m'
 banner(){ printf "\n${BLU}${BLD}== %s ==${RST}\n" "$*"; }
 kv(){ printf "  ${CYN}%-22s${RST} %s\n" "$1" "$2"; }
 ok(){ printf "${GRN}%s${RST}\n" "$*"; }
@@ -23,36 +24,40 @@ START_TS=$(date -Iseconds)
 # ----------------------------
 # Defaults (override via env)
 # ----------------------------
-WORKDIR="${WORKDIR:-$PWD}"             # project root (folder that contains run/cxr.py)
-PYFILE="${PYFILE:-run/cxr.py}"         # entrypoint
+WORKDIR="${WORKDIR:-$PWD}"
+PYFILE="${PYFILE:-run/cxr.py}"
 DATA_ROOT="/gluster/mmolefe/PhD/Super-Position Of Medical Imaging Diffusion Models For Disease Discovery/datasets/cleaned"
 
-TASK="${TASK:-TB}"                     # TB | PNEUMONIA
+TASK="${TASK:-TB}"
 SPLIT="${SPLIT:-train}"
 IMG_SIZE="${IMG_SIZE:-256}"
 
 # Overfit / tiny controls
-OVERFIT_ONE="${OVERFIT_ONE:-1}"        # 1 to overfit a single image
-OVERFIT_K="${OVERFIT_K:-0}"            # >0 to train on tiny-K
+OVERFIT_ONE="${OVERFIT_ONE:-0}"        # <<< CHANGED DEFAULT to 0
+OVERFIT_K="${OVERFIT_K:-0}"
 REPEAT_LEN="${REPEAT_LEN:-32768}"
 
 # Model width
-CHANNELS="${CHANNELS:-96,192,384,768}" # pass colon-separated if using --export; script converts below
+CHANNELS="${CHANNELS:-96,192,384,768}"
 EMBED_DIM="${EMBED_DIM:-256}"
 
 # Schedule & sampler
-SDE="${SDE:-VE}"                       # VE | VPSDE
-SIGMA_MAX="${SIGMA_MAX:-12.0}"         # used if SDE==VE
-SAMPLER="${SAMPLER:-pc}"               # pc | em | ode
+SDE="${SDE:-VE}"
+SIGMA_MAX="${SIGMA_MAX:-12.0}"
+SAMPLER="${SAMPLER:-pc}"
 NUM_STEPS="${NUM_STEPS:-500}"
-SNR="${SNR:-0.16}"                     # only meaningful for PC
+SNR="${SNR:-0.16}"
 EPS="${EPS:-1e-3}"
+# <<< NEW >>> Sampler control arguments
+SAMPLER_NOISE_SCALE="${SAMPLER_NOISE_SCALE:-1.0}"
+ADD_FINAL_NOISE="${ADD_FINAL_NOISE:-0}" # Use 1 for true, 0 for false
+DEBUG_SAMPLER="${DEBUG_SAMPLER:-0}"     # Use 1 for true, 0 for false
 
 # Training hygiene
 LR="${LR:-2e-4}"
 MIN_LR="${MIN_LR:-1e-5}"
 WARMUP_STEPS="${WARMUP_STEPS:-1000}"
-SCHEDULE="${SCHEDULE:-cosine}"         # const | cosine
+SCHEDULE="${SCHEDULE:-cosine}"
 GRAD_CLIP="${GRAD_CLIP:-1.0}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
 EPOCHS="${EPOCHS:-80}"
@@ -68,15 +73,15 @@ USE_EMA_FOR_SAMPLING="${USE_EMA_FOR_SAMPLING:-1}"
 # Experiment naming / output
 OUTPUT_ROOT="${OUTPUT_ROOT:-runs}"
 EXP_NAME="${EXP_NAME:-cxr_sde}"
-RUN_NAME="${RUN_NAME:-}"               # optional
-RESUME_DIR="${RESUME_DIR:-}"           # optional
-SAMPLES_DIR="${SAMPLES_DIR:-}"         # optional
+RUN_NAME="${RUN_NAME:-}"
+RESUME_DIR="${RESUME_DIR:-}"
+SAMPLES_DIR="${SAMPLES_DIR:-}"
 
 # WandB toggles
 WANDB="${WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-cxr-sde}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
-WANDB_TAGS="${WANDB_TAGS:-slurm}"      # pass colon-separated if using --export
+WANDB_TAGS="${WANDB_TAGS:-slurm}"
 WANDB_ID="${WANDB_ID:-}"
 
 # ----------------------------
@@ -85,21 +90,17 @@ WANDB_ID="${WANDB_ID:-}"
 mkdir -p "$WORKDIR/logs"
 cd "$WORKDIR"
 
-# Make PYTHONPATH robust even with `set -u`
 export PYTHONPATH="$WORKDIR${PYTHONPATH:+:$PYTHONPATH}"
-
-# Prefer CUDA for JAX, avoid huge preallocation
 export JAX_PLATFORMS=cuda
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export TF_CPP_MIN_LOG_LEVEL=3
 
-# Activate your env (choose one that exists on your cluster)
 source ~/.bashrc
-mamba activate "$ENV_NAME"
-ok "Activated micromamba: $ENV_NAME"
+mamba activate jax115
+ok "Activated micromamba: jax115"
+
 # ----------------------------
 # Normalize list-like vars
-# (allow colon-separated in --export)
 # ----------------------------
 CHANNELS="${CHANNELS//:/,}"
 WANDB_TAGS="${WANDB_TAGS//:/,}"
@@ -118,6 +119,7 @@ ARGS=(
   --seed "$SEED" --sample_every "$SAMPLE_EVERY"
   --ema_decay "$EMA_DECAY"
   --output_root "$OUTPUT_ROOT" --exp_name "$EXP_NAME"
+  --sampler_noise_scale "$SAMPLER_NOISE_SCALE" # <<< NEW
 )
 
 # VE-only flag
@@ -135,6 +137,14 @@ if [[ "$OVERFIT_ONE" == "1" ]]; then
   ARGS+=( --overfit_one --repeat_len "$REPEAT_LEN" )
 elif (( OVERFIT_K > 0 )); then
   ARGS+=( --overfit_k "$OVERFIT_K" )
+fi
+
+# <<< NEW >>> Add boolean sampler flags if they are set to 1
+if [[ "$ADD_FINAL_NOISE" == "1" ]]; then
+  ARGS+=( --sampler_add_final_noise )
+fi
+if [[ "$DEBUG_SAMPLER" == "1" ]]; then
+  ARGS+=( --debug_sampler )
 fi
 
 # Optional explicit samples dir / run name / resume
@@ -175,6 +185,8 @@ kv "SAMPLER"        "$SAMPLER"
 kv "NUM_STEPS"      "$NUM_STEPS"
 kv "SNR"            "$SNR"
 kv "EPS"            "$EPS"
+# <<< NEW >>> Print new sampler settings
+kv "SAMPLER_OPTS"   "noise_scale=$SAMPLER_NOISE_SCALE, final_noise=$ADD_FINAL_NOISE, debug=$DEBUG_SAMPLER"
 kv "EMA_DECAY"      "$EMA_DECAY"
 kv "EMA_SAMPLING"   "$USE_EMA_FOR_SAMPLING"
 kv "LR/SCHED"       "$LR / $SCHEDULE (warmup=$WARMUP_STEPS→min=$MIN_LR)"
@@ -188,7 +200,6 @@ kv "W&B"            "$WANDB (${WANDB_PROJECT}) tags=[$WANDB_TAGS]"
 # ----------------------------
 set +e
 if [[ "${SAMPLER}" == "pc" ]]; then
-  # PC needs SNR forwarded through env → ARGS (your sampler reads it from ARGS in cxr.py)
   ARGS+=( --snr "$SNR" )
 fi
 
