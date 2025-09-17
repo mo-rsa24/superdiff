@@ -48,7 +48,7 @@ SAMPLER="${SAMPLER:-pc}"
 NUM_STEPS="${NUM_STEPS:-500}"
 SNR="${SNR:-0.16}"
 EPS="${EPS:-1e-3}"
-# <<< NEW >>> Sampler control arguments
+
 SAMPLER_NOISE_SCALE="${SAMPLER_NOISE_SCALE:-1.0}"
 ADD_FINAL_NOISE="${ADD_FINAL_NOISE:-0}" # Use 1 for true, 0 for false
 DEBUG_SAMPLER="${DEBUG_SAMPLER:-0}"     # Use 1 for true, 0 for false
@@ -119,7 +119,7 @@ ARGS=(
   --seed "$SEED" --sample_every "$SAMPLE_EVERY"
   --ema_decay "$EMA_DECAY"
   --output_root "$OUTPUT_ROOT" --exp_name "$EXP_NAME"
-  --sampler_noise_scale "$SAMPLER_NOISE_SCALE" # <<< NEW
+  --sampler_noise_scale "$SAMPLER_NOISE_SCALE"
 )
 
 # VE-only flag
@@ -139,7 +139,6 @@ elif (( OVERFIT_K > 0 )); then
   ARGS+=( --overfit_k "$OVERFIT_K" )
 fi
 
-# <<< NEW >>> Add boolean sampler flags if they are set to 1
 if [[ "$ADD_FINAL_NOISE" == "1" ]]; then
   ARGS+=( --sampler_add_final_noise )
 fi
@@ -185,7 +184,7 @@ kv "SAMPLER"        "$SAMPLER"
 kv "NUM_STEPS"      "$NUM_STEPS"
 kv "SNR"            "$SNR"
 kv "EPS"            "$EPS"
-# <<< NEW >>> Print new sampler settings
+
 kv "SAMPLER_OPTS"   "noise_scale=$SAMPLER_NOISE_SCALE, final_noise=$ADD_FINAL_NOISE, debug=$DEBUG_SAMPLER"
 kv "EMA_DECAY"      "$EMA_DECAY"
 kv "EMA_SAMPLING"   "$USE_EMA_FOR_SAMPLING"
