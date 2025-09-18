@@ -26,7 +26,7 @@ START_TS=$(date -Iseconds)
 # ----------------------------
 WORKDIR="${WORKDIR:-$PWD}"
 PYFILE="${PYFILE:-run/cxr.py}"
-DATA_ROOT="/gluster/mmolefe/PhD/Super-Position Of Medical Imaging Diffusion Models For Disease Discovery/datasets/cleaned"
+DATA_ROOT="/datasets/mmolefe/cleaned"
 
 TASK="${TASK:-TB}"
 SPLIT="${SPLIT:-train}"
