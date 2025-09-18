@@ -11,7 +11,8 @@ export EPOCHS="50"
 export SCHEDULE="cosine"
 export RUN_NAME="pneumonia-full-train"
 export WANDB_TAGS="slurm,full,pneumonia"
-
+export SAMPLE_EVERY="10"
+export CKPT_EVERY="10"
 # Use default sampler settings for the full run
 export SAMPLER_NOISE_SCALE="1.0"
 export ADD_FINAL_NOISE="0"

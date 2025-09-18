@@ -118,6 +118,7 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch_per_device", type=int, default=4)
     p.add_argument("--sample_batch_size", type=int, default=8)
+    p.add_argument("--ckpt_every", type=int, default=1, help="Save a full checkpoint every N epochs.")
     p.add_argument("--seed", type=int, default=0)
 
     # EMA
@@ -413,12 +414,16 @@ def main():
         # Save checkpoint (include EMA)
         host_state_to_save = jax.device_get(jax.tree_map(lambda v: v[0], state))
         payload_bytes = to_bytes((host_state_to_save, ema_params, args.ema_decay))
-
-        ep_path = os.path.join(ckpt_dir, f"ep{epoch + 1:04d}.flax")
-        with tf.io.gfile.GFile(ep_path, "wb") as f:
-            f.write(payload_bytes)
         with tf.io.gfile.GFile(ckpt_latest, "wb") as f:
             f.write(payload_bytes)
+
+        # Only save the numbered epoch checkpoint periodically
+        if (epoch + 1) % max(1, args.ckpt_every) == 0:
+            ep_path = os.path.join(ckpt_dir, f"ep{epoch + 1:04d}.flax")
+            with tf.io.gfile.GFile(ep_path, "wb") as f:
+                f.write(payload_bytes)
+            if use_wandb:
+                wandb.log({"ckpt/epoch_path": ep_path, "epoch/idx": epoch + 1})
 
         avg_loss = float(np.mean(losses)) if len(losses) else float("nan")
         print(f"[epoch {epoch+1}] avg loss: {avg_loss:.6f}")
