@@ -429,8 +429,8 @@ def main():
         print(f"[epoch {epoch+1}] avg loss: {avg_loss:.6f}")
 
         if use_wandb:
-            wandb.log({"epoch/avg_loss": avg_loss, "epoch/idx": epoch+1,
-                       "ckpt/last_path": ckpt_latest, "ckpt/epoch_path": ep_path})
+            wandb.log({"epoch/avg_loss": avg_loss, "epoch/idx": epoch + 1,
+                       "ckpt/last_path": ckpt_latest})
 
         # --- Periodic sampling ---
         if ((epoch + 1) % max(1, args.sample_every)) == 0:
