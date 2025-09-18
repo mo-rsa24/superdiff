@@ -7,10 +7,12 @@
 export TASK="PNEUMONIA"
 export OVERFIT_K="512"
 export OVERFIT_ONE="0"
-export EPOCHS="20"
+export EPOCHS="100"
+export SAMPLE_EVERY="10"
 export SCHEDULE="cosine"
 export RUN_NAME="pneumonia-diagnostic-k512"
 export WANDB_TAGS="slurm,diagnostic,pneumonia"
+export SDE="VPSDE"
 
 # Use new sampler settings to prevent mode collapse on small dataset
 export SAMPLER_NOISE_SCALE="1.1"
