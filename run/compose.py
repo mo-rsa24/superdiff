@@ -184,11 +184,14 @@ def _load_model_from_run(output_root, run_name):
 
     # The new format saved (TrainState, ema_params, ema_decay). We only need ema_params.
     try:
-        _, ema_params, _ = from_bytes((state_template, params_template, 0.999), blob)
+        # Create a template for just the EMA params and restore into it.
+        restored_ema_params = from_bytes(params_template, blob)
         print("    - Successfully loaded EMA parameters.")
-        return model, ema_params, cfg, (mstd_fn, dcoeff_fn)
+        return model, restored_ema_params, cfg, (mstd_fn, dcoeff_fn)
     except Exception as e:
-        print(f"    - FAILED to load EMA params: {e}")
+        # Add more context to the error for easier debugging
+        print(f"    - FAILED to load EMA params. The model structure in your script might not match the"
+              f" checkpoint. \n      Original error: {type(e).__name__}: {e}")
         raise
 
 
