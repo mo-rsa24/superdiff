@@ -36,12 +36,12 @@ beta = lambda t: (1 + 0.5 * t * beta_0 + 0.5 * t ** 2 * (beta_1 - beta_0))
 log_sigma = lambda t: jnp.log(t)
 
 
-@jax.jit
-def score_function_hutchinson_estimator(key, score_fn, params, t, x):
+@jax.jit(static_argnums=(1,))
+def score_function_hutchinson_estimator(key, model, params, t, x):
     """Gets the score and its divergence using Hutchinson's estimator."""
     eps = jax.random.randint(key, x.shape, 0, 2).astype(float) * 2 - 1.0
     # Create a function of x only for jax.jvp
-    _score_fn_x = lambda _x: score_fn(params, _x, t)
+    _score_fn_x = lambda _x: model.apply(params, _x, t) # <-- Call model.apply here
     score_val, jvp_val = jax.jvp(_score_fn_x, (x,), (eps,))
     divergence = (jvp_val * eps).sum(axis=tuple(range(1, x.ndim)))
     return score_val, divergence
@@ -60,7 +60,7 @@ def get_kappa(t, divlog_1, divlog_2, score_1, score_2):
 
 
 def ito_dynamic_estimator_solver(
-        key, score_fn_a, params_a, score_fn_b, params_b,
+        key, model_a, params_a, model_b, params_b,
         marginal_prob_std_fn, diffusion_coeff_fn,
         shape, num_steps=500, eps=1e-3
 ):
@@ -84,8 +84,8 @@ def ito_dynamic_estimator_solver(
         key, subkey_a, subkey_b = jax.random.split(key, 3)
 
         # Get scores and divergences for both models
-        score_a, div_a = score_function_hutchinson_estimator(subkey_a, score_fn_a, params_a, t_batch, x)
-        score_b, div_b = score_function_hutchinson_estimator(subkey_b, score_fn_b, params_b, t_batch, x)
+        score_a, div_a = score_function_hutchinson_estimator(subkey_a, model_a, params_a, t_batch, x)
+        score_b, div_b = score_function_hutchinson_estimator(subkey_b, model_b, params_b, t_batch, x)
 
         # Compute kappa for each item in the batch
         kappa = get_kappa(t, div_a, div_b, score_a, score_b)
@@ -232,8 +232,8 @@ def main(args):
     # 4. Run the superposition sampler
     samples = ito_dynamic_estimator_solver(
         key=rng,
-        score_fn_a=model_a.apply, params_a={'params': params_a},
-        score_fn_b=model_b.apply, params_b={'params': params_b},
+        model_a=model_a, params_a={'params': params_a},
+        model_b=model_b, params_b={'params': params_b},
         marginal_prob_std_fn=marginal_prob_std_fn,
         diffusion_coeff_fn=diffusion_coeff_fn,
         shape=sample_shape,
