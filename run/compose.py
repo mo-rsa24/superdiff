@@ -171,7 +171,8 @@ def _load_model_from_run(output_root, run_name):
     img_size = int(cfg.get("img_size", 256))
     dummy_x = jnp.ones((1, img_size, img_size, 1), dtype=jnp.float32)
     dummy_t = jnp.ones((1,), dtype=jnp.float32)
-    params_template = model.init({'params': jax.random.PRNGKey(0)}, dummy_x, dummy_t)['params']
+    # Correct: Creates a nested template that matches the saved file
+    params_template = model.init({'params': jax.random.PRNGKey(0)}, dummy_x, dummy_t)
 
     # The TrainState template needs an optimizer, but it won't be used.
     state_template = TrainState.create(apply_fn=model.apply, params=params_template, tx=optax.adam(1e-4))
