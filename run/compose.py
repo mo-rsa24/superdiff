@@ -231,8 +231,8 @@ def main(args):
     # 4. Run the superposition sampler
     samples = ito_dynamic_estimator_solver(
         key=rng,
-        model_a=model_a, params_a={'params': params_a},
-        model_b=model_b, params_b={'params': params_b},
+        model_a=model_a, params_a=params_a,
+        model_b=model_b, params_b=params_b,
         marginal_prob_std_fn=marginal_prob_std_fn,
         diffusion_coeff_fn=diffusion_coeff_fn,
         shape=sample_shape,
