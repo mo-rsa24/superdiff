@@ -80,7 +80,8 @@ def parse_args():
     p.add_argument("--task", choices=["TB", "PNEUMONIA"], default="TB")
     p.add_argument("--split", choices=["train", "val", "test"], default="train")
     p.add_argument("--img_size", type=int, default=256)
-    p.add_argument("--class_filter", type=int, default=1, help="Optional: keep a class index only (e.g., 1)")
+    p.add_argument("--disease", default=True, action=argparse.BooleanOptionalAction,
+                   help="Train on diseased subset. Use --no-disease for normal subset.")
 
     # Debug/overfit
     p.add_argument("--overfit_one", action="store_true")
@@ -228,9 +229,11 @@ def main():
     rng = jax.random.PRNGKey(args.seed)
     C = 1
 
+    class_to_keep = 1 if args.disease else 0
+    print(f"[info] Training on {'diseased' if args.disease else 'normal'} data (class_filter={class_to_keep}).")
     ds = ChestXrayDataset(
         root_dir=args.data_root, task=args.task, split=args.split,
-        img_size=args.img_size, class_filter=args.class_filter
+        img_size=args.img_size, class_filter=class_to_keep
     )
     label_counts = Counter(ds.labels)
     ds_size = len(ds)

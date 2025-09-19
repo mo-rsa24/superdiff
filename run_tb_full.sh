@@ -7,7 +7,7 @@
 export TASK="TB"
 export OVERFIT_K="0"
 export OVERFIT_ONE="0"
-export EPOCHS="50"
+export EPOCHS="250"
 export SCHEDULE="cosine"
 export RUN_NAME="tb-full-train"
 export WANDB_TAGS="slurm,full,tb"

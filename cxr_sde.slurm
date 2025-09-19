@@ -31,9 +31,10 @@ DATA_ROOT="/datasets/mmolefe/cleaned"
 TASK="${TASK:-TB}"
 SPLIT="${SPLIT:-train}"
 IMG_SIZE="${IMG_SIZE:-256}"
+DISEASE="${DISEASE:-1}" # Use 1 for true (diseased), 0 for false (normal)
 
 # Overfit / tiny controls
-OVERFIT_ONE="${OVERFIT_ONE:-0}"        # <<< CHANGED DEFAULT to 0
+OVERFIT_ONE="${OVERFIT_ONE:-0}"
 OVERFIT_K="${OVERFIT_K:-0}"
 REPEAT_LEN="${REPEAT_LEN:-32768}"
 
@@ -123,7 +124,20 @@ ARGS=(
   --sampler_noise_scale "$SAMPLER_NOISE_SCALE"
 )
 
-# VE-only flag
+# Disease flag
+
+if [[ "$DISEASE" == "1" ]];
+
+then
+
+  ARGS+=( --disease )
+
+else
+
+  ARGS+=( --no-disease )
+
+fi
+
 if [[ "${SDE^^}" == "VE" ]]; then
   ARGS+=( --sigma_max "$SIGMA_MAX" )
 fi
@@ -177,6 +191,7 @@ kv "DATA_ROOT"      "$DATA_ROOT"
 
 banner "Flags"
 kv "TASK/SPLIT"     "$TASK / $SPLIT"
+kv "DATASET"        "$([[ "$DISEASE" == 1 ]] && echo "Diseased" || echo "Normal")"
 kv "IMG_SIZE"       "$IMG_SIZE"
 kv "CHANNELS"       "$CHANNELS"
 kv "SDE"            "$SDE"
