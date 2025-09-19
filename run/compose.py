@@ -4,7 +4,7 @@ import math
 import json
 import functools
 from datetime import datetime
-
+from torchvision.utils import save_image, make_grid
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -241,15 +241,20 @@ def main(args):
     )
 
     # 5. Process and save the results
+    # In main()
+    # 5. Process and save the results
     samples = jnp.clip(samples, 0.0, 1.0)
     samples = jnp.transpose(samples.reshape((-1, img_size, img_size, 1)), (0, 3, 1, 2))
     samples_t = torch.tensor(np.asarray(samples))
 
-    grid = save_image(samples_t, os.path.join(out_dir, "composed_samples_grid.png"),
-                      nrow=int(math.sqrt(args.batch_size)))
+    # First, create the 3D grid from the 4D batch of samples
+    grid_t = make_grid(samples_t, nrow=int(math.sqrt(args.batch_size)))
 
-    # Also save with matplotlib for convenience
-    grid_np = samples_t.permute(1, 2, 0).numpy()
+    # Save the grid using save_image
+    save_image(grid_t, os.path.join(out_dir, "composed_samples_grid.png"))
+
+    # Now, permute the 3D grid for matplotlib visualization
+    grid_np = grid_t.permute(1, 2, 0).numpy()
     plt.figure(figsize=(10, 10))
     plt.imshow(grid_np, cmap='gray')
     plt.axis("off")
@@ -258,7 +263,6 @@ def main(args):
     plt.close()
 
     print(f"[+] Done. Samples saved in {out_dir}")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Superposition Inference Script for Chest X-Ray Models")
