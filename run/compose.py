@@ -32,14 +32,12 @@ beta_0 = 0.1
 beta_1 = 20.0
 log_alpha = lambda t: -0.5 * t * beta_0 - 0.25 * t ** 2 * (beta_1 - beta_0)
 dlog_alphadt = jax.grad(lambda t: log_alpha(t).sum())
-beta = lambda t: (1 + 0.5 * t * beta_0 + 0.5 * t ** 2 * (beta_1 - beta_0))
 log_sigma = lambda t: jnp.log(t)
 
 
 def score_function_hutchinson_estimator(key, model, params, t, x):
     """Gets the score and its divergence using Hutchinson's estimator."""
     eps = jax.random.randint(key, x.shape, 0, 2).astype(float) * 2 - 1.0
-    # Create a function of x only for jax.jvp
     _score_fn_x = lambda _x: model.apply(params, _x, t)
     score_val, jvp_val = jax.jvp(_score_fn_x, (x,), (eps,))
     divergence = (jvp_val * eps).sum(axis=tuple(range(1, x.ndim)))
@@ -49,12 +47,9 @@ score_function_hutchinson_estimator_jit = jax.jit(score_function_hutchinson_esti
 @jax.jit
 def get_kappa(t, divlog_1, divlog_2, score_1, score_2):
     """Computes the optimal mixing coefficient kappa."""
-    # This simplified version assumes the Ornstein-Uhlenbeck SDE where f_t is linear,
-    # making some terms in the paper's full kappa derivation cancel out or simplify.
-    # The core dependency is on the difference between the scores and their divergences.
     numerator = jnp.exp(log_sigma(t)) * (divlog_1 - divlog_2) + \
                 (score_1 * (score_1 - score_2)).sum(axis=tuple(range(1, score_1.ndim)))
-    denominator = ((score_1 - score_2) ** 2).sum(axis=tuple(range(1, score_1.ndim))) + 1e-6  # Add epsilon for stability
+    denominator = ((score_1 - score_2) ** 2).sum(axis=tuple(range(1, score_1.ndim))) + 1e-6
     return numerator / denominator
 
 
@@ -64,11 +59,9 @@ def ito_dynamic_estimator_solver(
         shape, num_steps=500, eps=1e-3
 ):
     """
-    Performs 'Logical AND' superposition sampling using the Itô density estimator approach.
-    This is a deterministic ODE sampler.
+    Performs 'Logical AND' superposition sampling using a deterministic ODE sampler.
     """
     batch_size = shape[0]
-    img_size = shape[1]
 
     key, subkey = jax.random.split(key)
     # Start from pure noise at t=1
@@ -79,7 +72,6 @@ def ito_dynamic_estimator_solver(
 
     for t in tqdm.tqdm(time_steps, desc="Composing with 'AND' Sampler"):
         t_batch = jnp.ones(batch_size) * t
-
         key, subkey_a, subkey_b = jax.random.split(key, 3)
 
         # Get scores and divergences for both models
@@ -88,18 +80,24 @@ def ito_dynamic_estimator_solver(
 
         # Compute kappa for each item in the batch
         kappa = get_kappa(t, div_a, div_b, score_a, score_b)
-        kappa = jnp.clip(kappa, 0.0, 1.0)  # Clip kappa to be a valid mixing weight
+        kappa = jnp.clip(kappa, 0.0, 1.0)
 
-        # Reshape kappa to (B, 1, 1, 1) for broadcasting
+        # Reshape kappa for broadcasting
         kappa = kappa.reshape(-1, *([1] * (x.ndim - 1)))
 
         # Superposed score (s_b + k * (s_a - s_b))
         combined_score = score_b + kappa * (score_a - score_b)
 
-        # Reverse ODE step (Probability Flow ODE)
-        drift = -0.5 * (diffusion_coeff_fn(t) ** 2) * combined_score
-        x = x - drift * dt  # ODE step is subtraction because we go from t=1 to t=0
+        # Correct reverse ODE step for the VE SDE
+        forward_drift = dlog_alphadt(t_batch.reshape(-1, 1, 1, 1)) * x
+        score_drift = 0.5 * (diffusion_coeff_fn(t) ** 2) * combined_score
+        drift = forward_drift - score_drift
 
+        # Integrate backwards in time (dt is positive, so we subtract the step)
+        x = x - drift * dt
+
+    # Denormalize from [-1, 1] to [0, 1] for visualization
+    x = (x + 1.0) / 2.0
     return x
 
 
