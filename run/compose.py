@@ -184,16 +184,15 @@ def _load_model_from_run(output_root, run_name):
 
     # The new format saved (TrainState, ema_params, ema_decay). We only need ema_params.
     try:
-        # Create a template for just the EMA params and restore into it.
-        restored_ema_params = from_bytes(params_template, blob)
+        target_template = (None, params_template, None)
+        restored_tuple = from_bytes(target_template, blob)
+        restored_ema_params = restored_tuple[1]
         print("    - Successfully loaded EMA parameters.")
         return model, restored_ema_params, cfg, (mstd_fn, dcoeff_fn)
     except Exception as e:
-        # Add more context to the error for easier debugging
         print(f"    - FAILED to load EMA params. The model structure in your script might not match the"
               f" checkpoint. \n      Original error: {type(e).__name__}: {e}")
         raise
-
 
 def _assert_compat(cfg_a, cfg_b):
     """Ensures two model configs are compatible for superposition."""
