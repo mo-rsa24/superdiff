@@ -42,16 +42,24 @@ def score_function_hutchinson_estimator(key, model, params, t, x):
     score_val, jvp_val = jax.jvp(_score_fn_x, (x,), (eps,))
     divergence = (jvp_val * eps).sum(axis=tuple(range(1, x.ndim)))
     return score_val, divergence
+
+
 score_function_hutchinson_estimator_jit = jax.jit(score_function_hutchinson_estimator, static_argnums=(1,))
 
+
 @jax.jit
-def get_kappa(t, divlog_1, divlog_2, score_1, score_2):
+def get_kappa(t, divlog_1, divlog_2, score_1, score_2, marginal_prob_std_fn):
     """Computes the optimal mixing coefficient kappa."""
-    numerator = jnp.exp(log_sigma(t)) * (divlog_1 - divlog_2) + \
+    # FIX 1: Use the correct log_sigma based on the actual SDE's standard deviation
+    log_sigma_t = jnp.log(marginal_prob_std_fn(t))
+
+    numerator = jnp.exp(log_sigma_t) * (divlog_1 - divlog_2) + \
                 (score_1 * (score_1 - score_2)).sum(axis=tuple(range(1, score_1.ndim)))
     denominator = ((score_1 - score_2) ** 2).sum(axis=tuple(range(1, score_1.ndim))) + 1e-6
     return numerator / denominator
 
+
+# --- Main Sampler ---
 
 def ito_dynamic_estimator_solver(
         key, model_a, params_a, model_b, params_b,
@@ -64,7 +72,8 @@ def ito_dynamic_estimator_solver(
     batch_size = shape[0]
 
     key, subkey = jax.random.split(key)
-    # Start from pure noise at t=1
+    # The model was trained on data in [0, 1]. The SDE starts from this data and adds noise.
+    # The reverse process starts with pure noise and should generate samples back into the [0, 1] range.
     x = jax.random.normal(subkey, shape) * marginal_prob_std_fn(1.0)
 
     time_steps = jnp.linspace(1., eps, num_steps)
@@ -78,14 +87,11 @@ def ito_dynamic_estimator_solver(
         score_a, div_a = score_function_hutchinson_estimator_jit(subkey_a, model_a, params_a, t_batch, x)
         score_b, div_b = score_function_hutchinson_estimator_jit(subkey_b, model_b, params_b, t_batch, x)
 
-        # Compute kappa for each item in the batch
-        kappa = get_kappa(t, div_a, div_b, score_a, score_b)
+        # Compute kappa, passing in the correct std function
+        kappa = get_kappa(t, div_a, div_b, score_a, score_b, marginal_prob_std_fn)
         kappa = jnp.clip(kappa, 0.0, 1.0)
 
-        # Reshape kappa for broadcasting
         kappa = kappa.reshape(-1, *([1] * (x.ndim - 1)))
-
-        # Superposed score (s_b + k * (s_a - s_b))
         combined_score = score_b + kappa * (score_a - score_b)
 
         # Correct reverse ODE step for the VE SDE
@@ -93,11 +99,10 @@ def ito_dynamic_estimator_solver(
         score_drift = 0.5 * (diffusion_coeff_fn(t) ** 2) * combined_score
         drift = forward_drift - score_drift
 
-        # Integrate backwards in time (dt is positive, so we subtract the step)
+        # FIX 2: Correct ODE integration step (dt is positive, so we subtract)
         x = x - drift * dt
 
-    # Denormalize from [-1, 1] to [0, 1] for visualization
-    x = (x + 1.0) / 2.0
+    # FIX 3: Remove incorrect final normalization. The output should already be in the [0, 1] range.
     return x
 
 
