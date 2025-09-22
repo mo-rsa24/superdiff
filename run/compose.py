@@ -48,12 +48,11 @@ score_function_hutchinson_estimator_jit = jax.jit(score_function_hutchinson_esti
 
 
 @jax.jit
-def get_kappa(t, divlog_1, divlog_2, score_1, score_2, marginal_prob_std_fn):
+def get_kappa(sigma_t, divlog_1, divlog_2, score_1, score_2):
     """
     Compute the κ(t,x) weight for AND under a VE parameterization.
     κ ≈ σ(t)·(Δ log ρ) + <s1,(s1−s2)> / ||s1−s2||^2
     """
-    sigma_t = marginal_prob_std_fn(t)  # shape: (B,) or scalar
     # sum over non-batch axes
     red_axes = tuple(range(1, score_1.ndim))
     numerator = sigma_t * (divlog_1 - divlog_2) + (score_1 * (score_1 - score_2)).sum(axis=red_axes)
@@ -83,7 +82,8 @@ def ito_dynamic_estimator_solver(
         score_b, div_b = score_function_hutchinson_estimator_jit(subkey_b, model_b, params_b, t_batch, x)
 
         # Compute kappa, passing in the correct std function
-        kappa = get_kappa(t, div_a, div_b, score_a, score_b, marginal_prob_std_fn)
+        sigma_t = marginal_prob_std_fn(t_batch).astype(x.dtype)
+        kappa = get_kappa(sigma_t, div_a, div_b, score_a, score_b)
         kappa = jnp.clip(kappa, 0.0, 1.0)
         kappa = kappa.reshape((-1,) + (1,) * (x.ndim - 1))
         s_mix = score_b + kappa * (score_a - score_b)
