@@ -48,50 +48,70 @@ score_function_hutchinson_estimator_jit = jax.jit(score_function_hutchinson_esti
 
 
 @jax.jit
-def get_kappa(sigma_t, divlog_1, divlog_2, score_1, score_2):
+def get_kappa(dlog_a, dlog_b, v_a, v_b):
     """
-    Compute the κ(t,x) weight for AND under a VE parameterization.
-    κ ≈ σ(t)·(Δ log ρ) + <s1,(s1−s2)> / ||s1−s2||^2
+    κ in velocity space (VE parameterization):
+      κ = ((dlog_a - dlog_b) + <v_a - v_b, v_a + v_b>) / (||v_a - v_b||^2 + ε)
+    Inputs:
+      dlog_* : (B,)  estimates of -div v_* (Hutchinson)
+      v_*    : (B, H, W, C) velocities
+    Returns:
+      kappa  : (B,)  per-sample scalar weights
     """
-    # sum over non-batch axes
-    red_axes = tuple(range(1, score_1.ndim))
-    numerator = sigma_t * (divlog_1 - divlog_2) + (score_1 * (score_1 - score_2)).sum(axis=red_axes)
-    denominator = ((score_1 - score_2) ** 2).sum(axis=red_axes) + 1e-6
-    return numerator / denominator
+    red_axes = tuple(range(1, v_a.ndim))
+    num = (dlog_a - dlog_b) + ((v_a - v_b) * (v_a + v_b)).sum(axis=red_axes)
+    den = ((v_a - v_b) ** 2).sum(axis=red_axes) + 1e-6
+    return num / den
+
 
 def ito_dynamic_estimator_solver(
-        key, model_a, params_a, model_b, params_b,
-        marginal_prob_std_fn, diffusion_coeff_fn,
-        shape, num_steps=500, eps=1e-3
+    key, model_a, params_a, model_b, params_b,
+    marginal_prob_std_fn, diffusion_coeff_fn,
+    shape, num_steps=500, eps=1e-3,
 ):
     """
-    Performs 'Logical AND' superposition sampling using a deterministic ODE sampler.
+    Logical AND via VE probability-flow ODE (pixel space).
+    Integrates x' = v_mix where v_mix = v_b + κ (v_a - v_b),
+    v_* = -0.5 * g(t)^2 * s_*(x,t),  κ from velocity-space criterion.
     """
     batch_size = shape[0]
 
-    key, subkey = jax.random.split(key)
-    x = jax.random.normal(subkey, shape) * marginal_prob_std_fn(1.0)
-    time_steps = jnp.linspace(1., eps, num_steps)
+    # VE start: pure noise at σ_max ~= marginal_prob_std_fn(1.0)
+    key, sub = jax.random.split(key)
+    x = jax.random.normal(sub, shape) * marginal_prob_std_fn(1.0)
+
+    time_steps = jnp.linspace(1.0, eps, num_steps)
     dt = time_steps[0] - time_steps[1]
-    for t in time_steps:
-        t_batch = jnp.ones(batch_size) * t
-        key, subkey_a, subkey_b = jax.random.split(key, 3)
 
-        # Get scores and divergences for both models
-        score_a, div_a = score_function_hutchinson_estimator_jit(subkey_a, model_a, params_a, t_batch, x)
-        score_b, div_b = score_function_hutchinson_estimator_jit(subkey_b, model_b, params_b, t_batch, x)
+    def vel_and_dlog(rng, model, params, t_b, x_b):
+        """Return VE velocity v and dlog = -div v via Hutchinson JVP."""
+        g = diffusion_coeff_fn(t_b)                                   # (B,)
+        g2 = (g ** 2).reshape((-1,) + (1,) * (x_b.ndim - 1))          # (B,1,1,1)
+        def v_fn(_x):
+            s = model.apply(params, _x, t_b)                           # score(x,t)
+            return -0.5 * g2 * s                                       # velocity
+        eps_r = jax.random.randint(rng, x_b.shape, 0, 2).astype(x_b.dtype) * 2 - 1
+        v_val, jvp_val = jax.jvp(v_fn, (x_b,), (eps_r,))
+        red_axes = tuple(range(1, x_b.ndim))
+        div_v = (jvp_val * eps_r).sum(axis=red_axes)
+        dlog = -div_v
+        return v_val, dlog
 
-        # Compute kappa, passing in the correct std function
-        sigma_t = marginal_prob_std_fn(t_batch).astype(x.dtype)
-        kappa = get_kappa(sigma_t, div_a, div_b, score_a, score_b)
-        kappa = jnp.clip(kappa, 0.0, 1.0)
+    for t in tqdm.tqdm(time_steps, desc="Composing with 'AND' Sampler"):
+        t_b = jnp.full((batch_size,), t)
+        key, k1, k2 = jax.random.split(key, 3)
+
+        v_a, dlog_a = vel_and_dlog(k1, model_a, params_a, t_b, x)
+        v_b, dlog_b = vel_and_dlog(k2, model_b, params_b, t_b, x)
+
+        kappa = get_kappa(dlog_a, dlog_b, v_a, v_b)                    # (B,)
         kappa = kappa.reshape((-1,) + (1,) * (x.ndim - 1))
-        s_mix = score_b + kappa * (score_a - score_b)
-        g = diffusion_coeff_fn(t_batch)  # shape: (B,)
-        g2 = (g ** 2).reshape((-1,) + (1,) * (x.ndim - 1))  # broadcast to x
-        drift = -0.5 * g2 * s_mix
-        x = x + drift * dt
+
+        v_mix = v_b + kappa * (v_a - v_b)                              # (B,H,W,C)
+        x = x + v_mix * dt
+
     return x
+
 
 def ensure_dir(p):
     os.makedirs(p, exist_ok=True)
