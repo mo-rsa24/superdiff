@@ -47,67 +47,74 @@ def score_function_hutchinson_estimator(key, model, params, t, x):
 score_function_hutchinson_estimator_jit = jax.jit(score_function_hutchinson_estimator, static_argnums=(1,))
 
 
-@jax.jit
-def get_kappa(dlog_a, dlog_b, v_a, v_b):
+# ---------- replace get_kappa + solver in compose.py ----------
+
+def _vel_and_dlog_rng(rng, model, params, t_batch, x, diffusion_coeff_fn):
     """
-    κ in velocity space (VE parameterization):
-      κ = ((dlog_a - dlog_b) + <v_a - v_b, v_a + v_b>) / (||v_a - v_b||^2 + ε)
-    Inputs:
-      dlog_* : (B,)  estimates of -div v_* (Hutchinson)
-      v_*    : (B, H, W, C) velocities
     Returns:
-      kappa  : (B,)  per-sample scalar weights
+      v(x,t)   : VE velocity field  = -(1/2) g(t)^2 * sθ(x,t)
+      dlog(x,t): Hutchinson estimate of  -div v(x,t)  (this matches the notebook's 'dlog_*')
     """
+    # score: sθ(x,t)
+    score = model.apply(params, x, t_batch)  # ScoreNet signature: (x, t)
+
+    # VE velocity: v = -(1/2) g(t)^2 * sθ
+    g = diffusion_coeff_fn(t_batch)                   # (B,)
+    g2 = (g ** 2).reshape((-1,) + (1,) * (x.ndim - 1))  # broadcast to x
+    v = -0.5 * g2 * score
+
+    # Hutchinson on the velocity map (NOT on the score!)
+    eps = jax.random.randint(rng, x.shape, 0, 2).astype(x.dtype) * 2 - 1
+    v_fn = lambda _x: -0.5 * ((diffusion_coeff_fn(t_batch) ** 2)
+                              .reshape((-1,) + (1,) * (_x.ndim - 1))) * model.apply(params, _x, t_batch)
+    jvp_out = jax.jvp(v_fn, (x,), (eps,))[1]
+    # notebook computes: div = -(eps * jvp).sum(...)  → we return that as dlog
+    red_axes = tuple(range(1, x.ndim))
+    dlog = -(eps * jvp_out).sum(axis=red_axes)  # shape (B,)
+    return v, dlog
+
+
+@jax.jit
+def get_kappa_velocity(sigma_t, dlog_a, dlog_b, v_a, v_b, eps=1e-6):
     red_axes = tuple(range(1, v_a.ndim))
-    num = (dlog_a - dlog_b) + ((v_a - v_b) * (v_a + v_b)).sum(axis=red_axes)
-    den = ((v_a - v_b) ** 2).sum(axis=red_axes) + 1e-6
+    num = sigma_t * (dlog_a - dlog_b) + ((v_a - v_b) * (v_a + v_b)).sum(axis=red_axes)
+    den = ((v_a - v_b) ** 2).sum(axis=red_axes) + eps
     return num / den
 
 
 def ito_dynamic_estimator_solver(
     key, model_a, params_a, model_b, params_b,
     marginal_prob_std_fn, diffusion_coeff_fn,
-    shape, num_steps=500, eps=1e-3,
+    shape, num_steps=500, eps=1e-3
 ):
     """
-    Logical AND via VE probability-flow ODE (pixel space).
-    Integrates x' = v_mix where v_mix = v_b + κ (v_a - v_b),
-    v_* = -0.5 * g(t)^2 * s_*(x,t),  κ from velocity-space criterion.
+    VE reverse-ODE sampler with AND superposition in velocity space.
     """
-    batch_size = shape[0]
+    B = shape[0]
 
-    # VE start: pure noise at σ_max ~= marginal_prob_std_fn(1.0)
+    # init from the correct VE prior
     key, sub = jax.random.split(key)
     x = jax.random.normal(sub, shape) * marginal_prob_std_fn(1.0)
 
-    time_steps = jnp.linspace(1.0, eps, num_steps)
-    dt = time_steps[0] - time_steps[1]
+    # time grid (1 → eps)
+    t_grid = jnp.linspace(1.0, eps, num_steps, dtype=x.dtype)
+    dt = t_grid[0] - t_grid[1]  # positive scalar
 
-    def vel_and_dlog(rng, model, params, t_b, x_b):
-        """Return VE velocity v and dlog = -div v via Hutchinson JVP."""
-        g = diffusion_coeff_fn(t_b)                                   # (B,)
-        g2 = (g ** 2).reshape((-1,) + (1,) * (x_b.ndim - 1))          # (B,1,1,1)
-        def v_fn(_x):
-            s = model.apply(params, _x, t_b)                           # score(x,t)
-            return -0.5 * g2 * s                                       # velocity
-        eps_r = jax.random.randint(rng, x_b.shape, 0, 2).astype(x_b.dtype) * 2 - 1
-        v_val, jvp_val = jax.jvp(v_fn, (x_b,), (eps_r,))
-        red_axes = tuple(range(1, x_b.ndim))
-        div_v = (jvp_val * eps_r).sum(axis=red_axes)
-        dlog = -div_v
-        return v_val, dlog
+    for t in t_grid:
+        t_batch = jnp.full((B,), t, dtype=x.dtype)
 
-    for t in tqdm.tqdm(time_steps, desc="Composing with 'AND' Sampler"):
-        t_b = jnp.full((batch_size,), t)
+        # velocities + dlogs for both models (identical schedules/functions)
         key, k1, k2 = jax.random.split(key, 3)
+        v_a, dlog_a = _vel_and_dlog_rng(k1, model_a, params_a, t_batch, x, diffusion_coeff_fn)
+        v_b, dlog_b = _vel_and_dlog_rng(k2, model_b, params_b, t_batch, x, diffusion_coeff_fn)
 
-        v_a, dlog_a = vel_and_dlog(k1, model_a, params_a, t_b, x)
-        v_b, dlog_b = vel_and_dlog(k2, model_b, params_b, t_b, x)
+        # κ(t,x)
+        sigma_t = marginal_prob_std_fn(t_batch)  # (B,)
+        kappa = get_kappa_velocity(sigma_t, dlog_a, dlog_b, v_a, v_b)  # (B,)
+        kappa = kappa.reshape((-1,) + (1,) * (x.ndim - 1))  # broadcast
 
-        kappa = get_kappa(dlog_a, dlog_b, v_a, v_b)                    # (B,)
-        kappa = kappa.reshape((-1,) + (1,) * (x.ndim - 1))
-
-        v_mix = v_b + kappa * (v_a - v_b)                              # (B,H,W,C)
+        # mixed velocity and ODE step (VE: dx/dt = v_mix)
+        v_mix = v_b + kappa * (v_a - v_b)
         x = x + v_mix * dt
 
     return x
