@@ -49,17 +49,16 @@ score_function_hutchinson_estimator_jit = jax.jit(score_function_hutchinson_esti
 
 @jax.jit
 def get_kappa(t, divlog_1, divlog_2, score_1, score_2, marginal_prob_std_fn):
-    """Computes the optimal mixing coefficient kappa."""
-    # FIX 1: Use the correct log_sigma based on the actual SDE's standard deviation
-    log_sigma_t = jnp.log(marginal_prob_std_fn(t))
-
-    numerator = jnp.exp(log_sigma_t) * (divlog_1 - divlog_2) + \
-                (score_1 * (score_1 - score_2)).sum(axis=tuple(range(1, score_1.ndim)))
-    denominator = ((score_1 - score_2) ** 2).sum(axis=tuple(range(1, score_1.ndim))) + 1e-6
+    """
+    Compute the κ(t,x) weight for AND under a VE parameterization.
+    κ ≈ σ(t)·(Δ log ρ) + <s1,(s1−s2)> / ||s1−s2||^2
+    """
+    sigma_t = marginal_prob_std_fn(t)  # shape: (B,) or scalar
+    # sum over non-batch axes
+    red_axes = tuple(range(1, score_1.ndim))
+    numerator = sigma_t * (divlog_1 - divlog_2) + (score_1 * (score_1 - score_2)).sum(axis=red_axes)
+    denominator = ((score_1 - score_2) ** 2).sum(axis=red_axes) + 1e-6
     return numerator / denominator
-
-
-# --- Main Sampler ---
 
 def ito_dynamic_estimator_solver(
         key, model_a, params_a, model_b, params_b,
@@ -72,14 +71,10 @@ def ito_dynamic_estimator_solver(
     batch_size = shape[0]
 
     key, subkey = jax.random.split(key)
-    # The model was trained on data in [0, 1]. The SDE starts from this data and adds noise.
-    # The reverse process starts with pure noise and should generate samples back into the [0, 1] range.
     x = jax.random.normal(subkey, shape) * marginal_prob_std_fn(1.0)
-
     time_steps = jnp.linspace(1., eps, num_steps)
     dt = time_steps[0] - time_steps[1]
-
-    for t in tqdm.tqdm(time_steps, desc="Composing with 'AND' Sampler"):
+    for t in time_steps:
         t_batch = jnp.ones(batch_size) * t
         key, subkey_a, subkey_b = jax.random.split(key, 3)
 
@@ -90,26 +85,13 @@ def ito_dynamic_estimator_solver(
         # Compute kappa, passing in the correct std function
         kappa = get_kappa(t, div_a, div_b, score_a, score_b, marginal_prob_std_fn)
         kappa = jnp.clip(kappa, 0.0, 1.0)
-
-        kappa = kappa.reshape(-1, *([1] * (x.ndim - 1)))
-        combined_score = score_b + kappa * (score_a - score_b)
-
-        # Correct reverse ODE step for the VE SDE
-        forward_drift = dlog_alphadt(t_batch.reshape(-1, 1, 1, 1)) * x
-        score_drift = 0.5 * (diffusion_coeff_fn(t) ** 2) * combined_score
-        drift = forward_drift - score_drift
-
-        # FIX 2: Correct ODE integration step (dt is positive, so we subtract)
-        x = x - drift * dt
-
-    # FIX 3: Remove incorrect final normalization. The output should already be in the [0, 1] range.
+        kappa = kappa.reshape((-1,) + (1,) * (x.ndim - 1))
+        s_mix = score_b + kappa * (score_a - score_b)
+        g = diffusion_coeff_fn(t_batch)  # shape: (B,)
+        g2 = (g ** 2).reshape((-1,) + (1,) * (x.ndim - 1))  # broadcast to x
+        drift = -0.5 * g2 * s_mix
+        x = x + drift * dt
     return x
-
-
-# =================================================================================
-# MODEL LOADING & UTILITIES
-# Mostly from your original script, adapted for inference.
-# =================================================================================
 
 def ensure_dir(p):
     os.makedirs(p, exist_ok=True)
@@ -147,7 +129,7 @@ def _build_sde_from_cfg(cfg):
     sde_type = cfg.get("sde", "VE")
     if sde_type == "VE":
         from diffusion.equations import marginal_prob_std, diffusion_coeff
-        sigma_max = float(cfg.get("sigma_max", 25.0))
+        sigma_max = float(cfg.get("sigma_max",  12.0))
         mstd_fn = functools.partial(marginal_prob_std, sigma=sigma_max)
         dcoeff_fn = functools.partial(diffusion_coeff, sigma=sigma_max)
         return mstd_fn, dcoeff_fn
