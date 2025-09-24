@@ -68,5 +68,5 @@ def get_train_step_fn(
         new_state = state.apply_gradients(grads=mean_grad)
 
         return mean_loss, new_state
-    return jax.pmap(step_fn, in_axes=(0, 0, 0, None), axis_name='device')
+    return jax.pmap(step_fn, in_axes=(0, 0, 0, 0), axis_name='device')
 

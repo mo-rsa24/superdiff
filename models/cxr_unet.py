@@ -20,32 +20,26 @@ class GaussianFourierProjectionV2(nn.Module):
     embed_dim: int
     scale: float = 30.0
 
+    # In your new models/cxr_unet.py
+
     @nn.compact
     def __call__(self, t: jnp.ndarray) -> jnp.ndarray:
         """
+        Transforms scalar time `t` into a high-dimensional feature vector using
+        the original, robust broadcasting method.
+
         Args:
             t: A JAX array of shape `(B,)` representing timesteps.
 
         Returns:
             A JAX array of shape `(B, embed_dim)` for the time embedding.
         """
-        # Ensure time is a 1D vector.
-        t = jnp.asarray(t).reshape(-1)  # (B,)
         D = self.embed_dim // 2
-
-        # Initialize the projection matrix W.
-        # By initializing with shape (1, D), we are explicit and avoid potential
-        # shape inference issues across different Flax versions or runs.
         def _normal_init(key, shape, dtype=jnp.float32):
             return jax.random.normal(key, shape, dtype) * self.scale
-
-        W = self.param('W_v2', _normal_init, (1, D)) # <-- MODIFIED: Explicit 2D shape
+        W = self.param('W_v2', _normal_init, (D,))
         W = jax.lax.stop_gradient(W)
-
-        # Broadcasting: (B, 1) * (1, D) -> (B, D)
-        t_proj = t[:, None] * W * (2.0 * jnp.pi)
-
-        # Final Fourier embedding using sine and cosine.
+        t_proj = t[:, None] * W[None, :] * (2.0 * jnp.pi)
         return jnp.concatenate([jnp.sin(t_proj), jnp.cos(t_proj)], axis=-1)
 
 class DenseToMap(nn.Module):
