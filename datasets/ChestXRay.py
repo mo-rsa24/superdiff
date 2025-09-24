@@ -1,11 +1,6 @@
-# ChestXRay.py  (JAX-friendly dataset module)
-# Minimal, dependency-light dataset returning torch tensors compatible with PyTorch DataLoader.
-# Images are loaded as grayscale, resized to img_size, normalized to [-1, 1], shape (1, H, W).
-# This mirrors the interface your JAX training expects and keeps loader code simple.
-
 import os
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 from PIL import Image
 import numpy as np
 import torch
@@ -17,61 +12,55 @@ def _list_images(dirpath: Path) -> List[Path]:
 
 class ChestXrayDataset(Dataset):
     """
-    ChestXrayDataset(root_dir, task='TB', split='train', img_size=256, class_names=None)
+    ChestXrayDataset for multi-class conditional training.
 
-    Directory layout:
+    Directory layout expected:
         root_dir/
-          TB/         # or PNEUMONIA
             train/
-              <classA>/*.jpg|png
-              <classB>/*.jpg|png
+              NORMAL/*.jpg
+              PNEUMONIA/*.jpg
+              TB/*.jpg
             val/
             test/
-
-    We only need *images* for unconditional SDE (no labels). We keep labels in case you extend later.
     """
     def __init__(
         self,
         root_dir: str = "../datasets/cleaned",
-        task: str = "TB",
         split: str = "train",
         img_size: int = 256,
-        class_filter: Optional[int] = None,
     ):
-        root = Path(root_dir) / task.upper() / split.lower()
-        if not root.exists():
-            raise FileNotFoundError(f"Dataset path not found: {root}")
-        # Optional subfolders for classes; if none, just use all images in split folder
-        subdirs = [d for d in root.iterdir() if d.is_dir()]
-        img_paths: List[Path] = []
-        labels: List[int] = []
+        root = Path(root_dir) / split.lower()
+        if not root.is_dir():
+            raise FileNotFoundError(f"Dataset path not found or is not a directory: {root}")
 
-        if subdirs:
-            # Two-level layout (e.g., NORMAL/TB subfolders)
-            for label, d in enumerate(sorted(subdirs)):
-                if class_filter is not None and label != class_filter:
-                    continue
-                for p in _list_images(d):
-                    img_paths.append(p)
-                    labels.append(label)
-        else:
-            # Flat layout
-            for p in _list_images(root):
-                img_paths.append(p)
-                labels.append(0)
+        # Find class subdirectories (e.g., NORMAL, PNEUMONIA, TB)
+        class_dirs = sorted([d for d in root.iterdir() if d.is_dir()])
+        if not class_dirs:
+            raise RuntimeError(f"No class subdirectories found in {root}")
 
-        if not img_paths:
+        self.img_paths: List[Path] = []
+        self.labels: List[int] = []
+        self.class_map: Dict[str, int] = {d.name: i for i, d in enumerate(class_dirs)}
+
+        print(f"[Dataset] Found classes: {list(self.class_map.keys())}")
+
+        for class_name, label in self.class_map.items():
+            class_dir = root / class_name
+            for p in _list_images(class_dir):
+                self.img_paths.append(p)
+                self.labels.append(label)
+
+        if not self.img_paths:
             raise RuntimeError(f"No images found under {root}")
 
-        self.paths = img_paths
-        self.labels = labels
         self.img_size = int(img_size)
+        print(f"[Dataset] Loaded {len(self.img_paths)} images from {split} split.")
 
     def __len__(self) -> int:
-        return len(self.paths)
+        return len(self.img_paths)
 
-    def __getitem__(self, idx: int):
-        p = self.paths[idx]
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+        p = self.img_paths[idx]
         img = Image.open(p).convert("L").resize((self.img_size, self.img_size), Image.BICUBIC)
         x = np.asarray(img, dtype=np.float32) / 255.0   # [0,1]
         x = x * 2.0 - 1.0                               # [-1,1]

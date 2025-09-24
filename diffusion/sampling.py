@@ -1,303 +1,178 @@
-from typing import Tuple
+# Samplers updated for conditional generation.
+import jax
 import jax.numpy as jnp
 import numpy as np
-from jax import *
-from tqdm import trange
+from jax import random
 import tqdm
-import math
-from diffusion.equations import diffusion, drift, score_function_hutchinson_estimator, get_kappa, dlog_alphadt, beta, \
-    dlogqdt
-import os
-from torchvision.utils import save_image
-import torch
+from scipy import integrate
+from typing import Optional, Callable
+import flax.linen as nn # <-- ADDED: Import for nn.Module type hint
 
+# This import assumes your SDE definitions are in a 'diffusion' directory.
+# from diffusion.equations import sde_fn_type # <-- REMOVED: This type alias doesn't exist.
 
-def reverse_sde(state, sample_data, key, dt:float = 1e-2, xi: float = 1.0, t: float = 1.0):
-  """
-   The trajectory is progressive. Meaning that starting at t=0, we sample noise once.
-   Perform operations using the previous values.
+def make_pmap_score_fn(score_model: nn.Module, conditional: bool) -> Callable:
+    """
+    Creates a pmapped score function that handles optional conditioning.
 
-   You evolve the same 512 particles across time, recording their states along the pat
-   xi is pronounced "Kai"
-  """
-  datapoints, coordinates = sample_data.shape
-  num_timesteps = int(t/dt)+1 # time index i = 0, 1, .... n (include start and 100 steps)
-  t = t * jnp.ones((datapoints, 1)) # Broadcasted time vector per particle (starts at 1)
-  key, subkey = random.split(key, num=2)
-  trajectory_field = jnp.zeros((datapoints, num_timesteps, coordinates)) # Storage for whole trajectory
-  pure_noise = random.normal(subkey, shape=(datapoints, coordinates))
-  trajectory_field = trajectory_field.at[:, 0, :].set(pure_noise)
-  trajectory = euler_murayama(key, t, state, trajectory_field, xi=xi, dt=dt, num_timesteps=num_timesteps, shape=sample_data.shape)
-  return trajectory
+    Args:
+        score_model: The Flax model used to predict the score.
+        conditional: A boolean indicating whether to expect a class label `y`.
 
-
-def euler_murayama(key, t, state, trajectory, xi: float = 1.0, dt: float = 1e-2, num_timesteps: int=100,  shape: Tuple[int,int] = (512, 2)):
-  # diffusion at timestep i
-  for timestep in trange(num_timesteps-1):
-    key, subkey = random.split(key, 2)
-    epsilon = random.normal(subkey, shape)
-    diffusion_term = diffusion(dt, state, t, trajectory[:, timestep, :], xi)
-    drift_term  = drift(t, epsilon, dt)
-    dx = diffusion_term + drift_term
-    trajectory = trajectory.at[:, timestep+1, :].set(trajectory[:, timestep, :] + dx) # Take a step
-    t += -dt
-  return trajectory
-
-def compose_and_estimate_log_likelihood_along_superposed_trajectory(state_a, state_b, key, dt:float = 1e-2, t: float = 1.0, shape: Tuple[int, int] = (512, 2)):
-    datapoints, coordinates = shape
-    num_timesteps = int(t / dt) + 1  # time index i = 0, 1, .... n (include start and 100 steps)
-    t = t * jnp.ones((datapoints, 1))  # Broadcasted time vector per particle (starts at 1)
-    key, subkey = random.split(key, num=2)
-    trajectory_field = jnp.zeros((datapoints, num_timesteps, coordinates))  # Storage for whole trajectory
-    pure_noise = random.normal(subkey, shape=(datapoints, coordinates))
-    trajectory_field = trajectory_field.at[:, 0, :].set(pure_noise)
-    trajectory, log_likelihood_model_a, log_likelihood_model_b = ito_dynamic_estimator_solver(key, t, state_a, state_b, trajectory_field, dt=dt, num_timesteps=num_timesteps,  shape=shape)
-    return trajectory, log_likelihood_model_a, log_likelihood_model_b
-
-def ito_dynamic_estimator_solver(key, t, state_a, state_b, trajectory, dt: float = 1e-2, num_timesteps: int=100,  shape: Tuple[int,int] = (512, 2)):
-    datapoints, coordinates = shape
-    log_likelihood_model_a = np.zeros((datapoints, num_timesteps))
-    log_likelihood_model_b = np.zeros((datapoints, num_timesteps))
-    for timestep in trange(num_timesteps-1):
-        x_t = trajectory[:, timestep, :]
-        key, subkey = random.split(key, 2)
-        score_model_a, score_divergence_model_a = score_function_hutchinson_estimator(key, t, state_a, x_t)
-        score_model_b, score_divergence_model_b = score_function_hutchinson_estimator(key, t, state_b, x_t)
-        kappa = get_kappa(t, (score_divergence_model_a, score_divergence_model_b), (score_model_a, score_model_b))
-        reverse_drift_ode = dlog_alphadt(t)*x_t - beta(t)*(score_model_b + kappa*(score_model_a-score_model_b))
-        trajectory = trajectory.at[:, timestep + 1, :].set(x_t -  dt*reverse_drift_ode)  # Take a step
-        log_likelihood_model_a[:,timestep+1] = log_likelihood_model_a[:,timestep] - dt*dlogqdt(t, x_t, score_model_a, score_divergence_model_a, reverse_drift_ode).squeeze()
-        log_likelihood_model_b[:,timestep+1] = log_likelihood_model_b[:,timestep] - dt*dlogqdt(t, x_t, score_model_b, score_divergence_model_b, reverse_drift_ode).squeeze()
-        t += -dt
-    return trajectory, log_likelihood_model_a, log_likelihood_model_b
-
-
-
-num_steps = 500
-#
-# def score_fn(score_model, params, x, t):
-#     return score_model.apply(params, x, t)
-
-
-# pmap_score_fn = jax.pmap(score_fn, in_axes=(None, None, 0, 0))
-
-def make_pmap_score_fn(score_model):
-    def score_fn(params, x, t):
-        return score_model.apply(params, x, t)
-    return jax.pmap(score_fn, in_axes=(None, 0, 0))
-
-def Euler_Maruyama_sampler(rng, score_model, params, marginal_prob_std, diffusion_coeff,
-                           batch_size=64, num_steps=num_steps, eps=1e-3, img_size=28,
-                           noise_scale=1.0, add_final_noise=False):
-    devices = jax.local_device_count()
-    if batch_size % devices != 0:
-        raise ValueError(
-            f"sample_batch_size ({batch_size}) must be divisible by local_device_count ({devices}). "
-            "Choose a multiple to avoid degenerate sampling.")
-    pmap_score_fn = make_pmap_score_fn(score_model)
-    time_shape   = (devices, batch_size // devices)
-    sample_shape = time_shape + (img_size, img_size, 1)
-    rng, step_rng = jax.random.split(rng)
-    init_x = jax.random.normal(step_rng, sample_shape) * marginal_prob_std(1.)
-    time_steps = jnp.linspace(1., eps, num_steps)
-    step_size = time_steps[0] - time_steps[1]
-    x = init_x
-    for time_step in tqdm.tqdm(time_steps):
-        batch_time_step = jnp.ones(time_shape) * time_step
-        g = diffusion_coeff(time_step)
-        mean_x = x + (g ** 2) * pmap_score_fn(params, x, batch_time_step) * step_size
-        rng, step_rng = jax.random.split(rng)
-        noise = jax.random.normal(step_rng, x.shape)
-        x = mean_x + jnp.sqrt(step_size) * g * noise * noise_scale
-    if add_final_noise:
-        rng, step_rng = jax.random.split(rng)
-        g = diffusion_coeff(eps)
-        noise = jax.random.normal(step_rng, mean_x.shape)
-        return mean_x + jnp.sqrt(step_size) * g * noise * noise_scale
+    Returns:
+        A pmapped function for score evaluation.
+    """
+    if conditional:
+        def score_fn(params, x, t, y):
+            # Assumes the model's apply method handles {'params': ...} dictionary
+            return score_model.apply({'params': params}, x, t, y)
+        # Pmap over the batch dimensions of x, t, and y.
+        return jax.pmap(score_fn, in_axes=(None, 0, 0, 0))
     else:
-        return mean_x
+        def score_fn(params, x, t):
+            return score_model.apply({'params': params}, x, t)
+        # Pmap over the batch dimensions of x and t.
+        return jax.pmap(score_fn, in_axes=(None, 0, 0))
 
+def pc_sampler(
+    rng: jax.Array,
+    score_model: nn.Module,
+    params: dict,
+    marginal_prob_std: Callable,
+    diffusion_coeff: Callable, # <-- MODIFIED: Replaced sde_fn_type with Callable
+    batch_size: int,
+    img_size: int,
+    num_steps: int = 500,
+    snr: float = 0.16,
+    eps: float = 1e-3,
+    y_cond: Optional[jnp.ndarray] = None
+) -> jnp.ndarray:
+    """
+    Predictor-Corrector sampler for conditional generation.
 
+    Args:
+        y_cond: Sharded class labels of shape `(num_devices, B // num_devices)`.
+                If provided, enables conditional sampling.
 
-# @title Define the Predictor-Corrector sampler (double click to expand or collapse)
-
-signal_to_noise_ratio = 0.16  # @param {'type':'number'}
-
-## The number of sampling steps.
-num_steps = 500  # @param {'type':'integer'}
-
-
-def pc_sampler(rng,
-               score_model,
-               params,
-               marginal_prob_std,
-               diffusion_coeff,
-               batch_size=64,
-               img_size=28,
-               num_steps=num_steps,
-               snr=0.16,
-               eps=1e-3,
-               noise_scale=1.0, add_final_noise=False): # <<< MODIFIED >>>
+    Returns:
+        Generated samples.
+    """
     devices = jax.local_device_count()
-    pmap_score_fn = make_pmap_score_fn(score_model)
+    is_conditional = y_cond is not None
+    pmap_score_fn = make_pmap_score_fn(score_model, conditional=is_conditional)
     time_shape = (devices, batch_size // devices)
-    if batch_size % devices != 0:
-        raise ValueError(
-                    f"sample_batch_size ({batch_size}) must be divisible by local_device_count ({devices}). "
-            "Choose a multiple to avoid degenerate sampling.")
-
     sample_shape = time_shape + (img_size, img_size, 1)
+
     rng, step_rng = jax.random.split(rng)
     init_x = jax.random.normal(step_rng, sample_shape) * marginal_prob_std(1.)
     time_steps = jnp.linspace(1., eps, num_steps)
     step_size = time_steps[0] - time_steps[1]
     x = init_x
-    for time_step in tqdm.tqdm(time_steps, desc="Predictor-Corrector"): # <<< MODIFIED >>>
+
+    for time_step in tqdm.tqdm(time_steps, desc="PC Sampler"):
         batch_time_step = jnp.ones(time_shape) * time_step
+        args = (params, x, batch_time_step, y_cond) if is_conditional else (params, x, batch_time_step)
+
         # Corrector step (Langevin MCMC)
-        grad = pmap_score_fn(params, x, batch_time_step)
-        grad_norm = jnp.linalg.norm(grad.reshape(sample_shape[0], sample_shape[1], -1),
-                                    axis=-1).mean()
-        noise_norm = np.sqrt(np.prod(x.shape[1:]))
-        langevin_step_size = 2 * (snr * noise_norm / grad_norm) ** 2
+        grad = pmap_score_fn(*args)
+        grad_norm = jnp.linalg.norm(grad.reshape(grad.shape[0], -1), axis=-1).mean()
+        noise_norm = np.sqrt(np.prod(x.shape[2:])) # H*W*C
+        langevin_step_size = 2 * (snr * noise_norm / (grad_norm + 1e-6)) ** 2
         rng, step_rng = jax.random.split(rng)
         z = jax.random.normal(step_rng, x.shape)
-        x = x + langevin_step_size * grad + jnp.sqrt(2 * langevin_step_size) * z * noise_scale
-        # Predictor step (Euler-Maruyama)
+        x = x + langevin_step_size * grad + jnp.sqrt(2 * langevin_step_size) * z
+
+        # Predictor step (Reverse SDE)
         g = diffusion_coeff(time_step)
-        score = pmap_score_fn(params, x, batch_time_step)
+        score = pmap_score_fn(*args)
         x_mean = x + (g ** 2) * score * step_size
         rng, step_rng = jax.random.split(rng)
         z = jax.random.normal(step_rng, x.shape)
-        x = x_mean + jnp.sqrt(g ** 2 * step_size) * z * noise_scale
-    if add_final_noise:
-        return x # x already has noise from the last step
-    else:
-        return x_mean
+        x = x_mean + jnp.sqrt(g ** 2 * step_size) * z
 
+    return x_mean
 
-def Euler_Maruyama_debugger(rng, score_model, params, marginal_prob_std, diffusion_coeff,
-                            batch_size=64, num_steps=500, eps=1e-3, img_size=28,
-                            out_dir=".", epoch=0):
-    def _save_grid(x_state, step_idx):
-        """Helper to save a grid of samples at a given step."""
-        samples_t = torch.tensor(np.asarray(jnp.clip(x_state, 0.0, 1.0)))
-        samples_t = samples_t.reshape(-1, img_size, img_size, 1).permute(0, 3, 1, 2)
-        grid_path = os.path.join(out_dir, f"debug_epoch_{epoch:03d}_step_{step_idx:04d}.png")
-        save_image(samples_t, grid_path, nrow=int(math.sqrt(batch_size)))
-        print(f"[debug] Saved intermediate grid to {grid_path}")
-
+def Euler_Maruyama_sampler(
+    rng: jax.Array,
+    score_model: nn.Module,
+    params: dict,
+    marginal_prob_std: Callable,
+    diffusion_coeff: Callable, # <-- MODIFIED: Replaced sde_fn_type with Callable
+    batch_size: int,
+    img_size: int,
+    num_steps: int = 500,
+    eps: float = 1e-3,
+    y_cond: Optional[jnp.ndarray] = None
+) -> jnp.ndarray:
+    """Euler-Maruyama sampler for conditional generation."""
     devices = jax.local_device_count()
-    pmap_score_fn = make_pmap_score_fn(score_model)
+    is_conditional = y_cond is not None
+    pmap_score_fn = make_pmap_score_fn(score_model, conditional=is_conditional)
     time_shape = (devices, batch_size // devices)
     sample_shape = time_shape + (img_size, img_size, 1)
+
     rng, step_rng = jax.random.split(rng)
-
     init_x = jax.random.normal(step_rng, sample_shape) * marginal_prob_std(1.)
-    # Denormalize initial noise to [0,1] for visualization, treating it like an image
-    init_x_vis = (init_x - jnp.min(init_x)) / (jnp.max(init_x) - jnp.min(init_x))
-    _save_grid(init_x_vis, 0)
-
     time_steps = jnp.linspace(1., eps, num_steps)
     step_size = time_steps[0] - time_steps[1]
     x = init_x
 
-    # Save at 25%, 50%, 75%, 100%
-    save_points = {int(num_steps * p) for p in [0.25, 0.50, 0.75]}
-
-    for i, time_step in enumerate(tqdm.tqdm(time_steps, desc="Debug Sampler")):
+    for time_step in tqdm.tqdm(time_steps, desc="EM Sampler"):
         batch_time_step = jnp.ones(time_shape) * time_step
         g = diffusion_coeff(time_step)
-        mean_x = x + (g ** 2) * pmap_score_fn(params, x, batch_time_step) * step_size
+        args = (params, x, batch_time_step, y_cond) if is_conditional else (params, x, batch_time_step)
+        score = pmap_score_fn(*args)
+        mean_x = x + (g ** 2) * score * step_size
         rng, step_rng = jax.random.split(rng)
         noise = jax.random.normal(step_rng, x.shape)
         x = mean_x + jnp.sqrt(step_size) * g * noise
-
-        if i + 1 in save_points:
-            _save_grid(x, i + 1)
-
-    _save_grid(mean_x, num_steps)  # Save final deterministic state
     return mean_x
-# @title Define the ODE sampler (double click to expand or collapse)
 
-from scipy import integrate
-
-## The error tolerance for the black-box ODE solver
-error_tolerance = 1e-5  # @param {'type': 'number'}
-
-
-def ode_sampler(rng,
-                score_model,
-                params,
-                marginal_prob_std,
-                diffusion_coeff,
-                batch_size=64,
-                atol=error_tolerance,
-                rtol=error_tolerance,
-                z=None,
-                img_size=28,
-                eps=1e-3):
-    """Generate samples from score-based models with black-box ODE solvers.
-
-    Args:
-      rng: A JAX random state.
-      score_model: A `flax.linen.Module` object  that represents architecture
-        of the score-based model.
-      params: A dictionary that contains model parameters.
-      marginal_prob_std: A function that returns the standard deviation
-        of the perturbation kernel.
-      diffusion_coeff: A function that returns the diffusion coefficient of the SDE.
-      batch_size: The number of samplers to generate by calling this function once.
-      atol: Tolerance of absolute errors.
-      rtol: Tolerance of relative errors.
-      z: The latent code that governs the final sample. If None, we start from p_1;
-        otherwise, we start from the given z.
-      eps: The smallest time step for numerical stability.
-    """
+def ode_sampler(
+    rng: jax.Array,
+    score_model: nn.Module,
+    params: dict,
+    marginal_prob_std: Callable,
+    diffusion_coeff: Callable, # <-- MODIFIED: Replaced sde_fn_type with Callable
+    batch_size: int,
+    img_size: int,
+    eps: float = 1e-3,
+    y_cond: Optional[jnp.ndarray] = None,
+    atol: float = 1e-5,
+    rtol: float = 1e-5
+) -> jnp.ndarray:
+    """ODE sampler for conditional generation using SciPy's ODE solver."""
     devices = jax.local_device_count()
-    if batch_size % devices != 0:
-        raise ValueError(f"sample_batch_size ({batch_size}) must be divisible by local_device_count ({devices}). "
-            + "Choose a multiple to avoid degenerate sampling."
-            )
-    pmap_score_fn = make_pmap_score_fn(score_model)
+    is_conditional = y_cond is not None
+    pmap_score_fn = make_pmap_score_fn(score_model, conditional=is_conditional)
     time_shape = (devices, batch_size // devices)
     sample_shape = time_shape + (img_size, img_size, 1)
-    # Create the latent code
-    if z is None:
-        rng, step_rng = jax.random.split(rng)
-        z = jax.random.normal(step_rng, sample_shape)
-        init_x = z * marginal_prob_std(1.)
-    else:
-        init_x = z
 
-    shape = init_x.shape
+    rng, step_rng = jax.random.split(rng)
+    init_x = jax.random.normal(step_rng, sample_shape) * marginal_prob_std(1.)
 
+    # Wrapper to interface JAX score function with SciPy's NumPy-based solver.
     def score_eval_wrapper(sample, time_steps):
+        # Convert NumPy inputs from solver back to JAX arrays.
         sample = jnp.asarray(sample, dtype=jnp.float32).reshape(sample_shape)
         time_steps = jnp.asarray(time_steps).reshape(time_shape)
-        score = pmap_score_fn(params, sample, time_steps)
+        args = (params, sample, time_steps, y_cond) if is_conditional else (params, sample, time_steps)
+        score = pmap_score_fn(*args)
+        # Convert JAX output back to NumPy for the solver.
         return np.asarray(score).reshape((-1,)).astype(np.float64)
 
     def ode_func(t, x):
-        """The ODE function for use by the ODE solver."""
-        time_steps = np.ones(time_shape) * t
+        """The ODE function for the probability flow ODE."""
+        time_steps = np.ones((batch_size,)) * t
         g = diffusion_coeff(t)
         return -0.5 * (g ** 2) * score_eval_wrapper(x, time_steps)
 
-    # Run the black-box ODE solver.
-    res = integrate.solve_ivp(ode_func, (1., eps), np.asarray(init_x).reshape(-1),
-                              rtol=rtol, atol=atol, method='RK45')
-    print(f"Number of function evaluations: {res.nfev}")
-    x = jnp.asarray(res.y[:, -1]).reshape(shape)
-
+    # Solve the ODE.
+    res = integrate.solve_ivp(
+        ode_func, (1., eps), np.asarray(init_x).reshape(-1),
+        rtol=rtol, atol=atol, method='RK45'
+    )
+    # Reshape final result back to image dimensions.
+    x = jnp.asarray(res.y[:, -1]).reshape(sample_shape)
     return x
 
-def select_sampler(name: str):
-    name = name.lower()
-    if name in ("pc", "predictor-corrector"):
-        return pc_sampler
-    if name in ("em", "euler", "euler-maruyama"):
-        return Euler_Maruyama_sampler
-    if name in ("ode", "pf-ode", "probability-flow-ode"):
-        return ode_sampler
-    raise ValueError(f"Unknown sampler: {name}")

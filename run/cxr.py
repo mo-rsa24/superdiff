@@ -1,561 +1,214 @@
-# cxr.py — score-SDE trainer for Chest X-rays with PC sampling, EMA, schedules
-import argparse, os, math, json, functools
+"""
+Main training script for a class-conditional Score-SDE model on Chest X-rays.
+
+This script handles:
+1. Parsing command-line arguments for configuration.
+2. Setting up the appropriate SDE (VE or VPSDE).
+3. Loading the ChestXrayDataset.
+4. Initializing the conditional ScoreNet model, optimizer, and training state.
+5. Running the main training loop with periodic sampling and checkpointing.
+"""
+import argparse
+import functools
+import json
+import os
 from datetime import datetime
-from collections import Counter
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import tensorflow as tf
-import tqdm
 import torch
+import tqdm
+from flax.serialization import from_bytes, to_bytes
+from flax.training.train_state import TrainState
 from torch.utils.data import DataLoader
 
-from flax import struct
-from flax.training.train_state import TrainState
-from flax.serialization import to_bytes, from_bytes
-
-# --- Local dataset ---
+# --- Local Project Modules ---
+# Note: Ensure these paths are correct relative to your project structure.
 from datasets.ChestXRay import ChestXrayDataset
+from diffusion.equations import (diffusion_coeff, marginal_prob_std,
+                                 vpsde_diffusion_coeff,
+                                 vpsde_marginal_prob_std)
+from diffusion.sampling import Euler_Maruyama_sampler, ode_sampler, pc_sampler
+from models.cxr_unet import ScoreNet
+from train.train_score_sde import get_train_step_fn
 
-# --- Project modules (equations / sampling / model / loss) ---
-# VE schedule always exists; VPSDE is optional (we try-import below)
-from diffusion.equations import marginal_prob_std, diffusion_coeff  # VE  :contentReference[oaicite:5]{index=5}
-from diffusion.sampling import (
-    ode_sampler, Euler_Maruyama_sampler, pc_sampler, Euler_Maruyama_debugger
-)
-
-from models.cxr_unet import ScoreNet                                 #     :contentReference[oaicite:7]{index=7}
-from train.train_score_sde import get_train_step_fn                  #     :contentReference[oaicite:8]{index=8}
-
-# --- Optional: Weights & Biases ---
-try:
-    import wandb
-    _WANDB_AVAILABLE = True
-except Exception:
-    wandb = None
-    _WANDB_AVAILABLE = False
-
-
-# ---------------- Utils ----------------
-
-def n_local_devices():
-    return jax.local_device_count()
-
-def tile_to_multiple(x_np, multiple):
-    B = x_np.shape[0]
-    if B % multiple == 0:
-        return x_np
-    pad = multiple - (B % multiple)
-    reps = (pad + B - 1) // B + 1
-    tiled = np.concatenate([x_np] * reps, axis=0)
-    return tiled[:B + pad]
-
-def to_pmap_batch(x_np, H, W, C):
-    devices = n_local_devices()
-    x_np = tile_to_multiple(x_np, devices)
-    return x_np.reshape(devices, -1, H, W, C)
-
-def make_grid_torch(imgs_tensor, nrow=None):
-    from torchvision.utils import make_grid
-    N = imgs_tensor.shape[0]
-    if nrow is None:
-        nrow = int(math.sqrt(max(1, N)))
-    return make_grid(imgs_tensor, nrow=nrow)
-
-def ensure_dir(p):
-    os.makedirs(p, exist_ok=True)
-    return p
-
-def tree_ema_update(ema, new, decay):
-    return jax.tree_map(lambda e, p: e * decay + (1.0 - decay) * p, ema, new)
-# ---------------- CLI ----------------
 
 def parse_args():
-    p = argparse.ArgumentParser("JAX SDE Chest X-ray trainer (overfit/tiny/full)")
-
+    """Parses command-line arguments for the training run."""
+    p = argparse.ArgumentParser("JAX Conditional SDE Chest X-ray Trainer")
     # Data
-    p.add_argument("--data_root", default="../datasets/cleaned")
-    p.add_argument("--task", choices=["TB", "PNEUMONIA"], default="TB")
+    p.add_argument("--data_root", default="../datasets/cleaned_2/TB", help="Path to the dataset.")
     p.add_argument("--split", choices=["train", "val", "test"], default="train")
-    p.add_argument("--img_size", type=int, default=256)
-    p.add_argument("--disease", default=True, action=argparse.BooleanOptionalAction,
-                   help="Train on diseased subset. Use --no-disease for normal subset.")
-
-    # Debug/overfit
-    p.add_argument("--overfit_one", action="store_true")
-    p.add_argument("--overfit_k", type=int, default=0)
-    p.add_argument("--repeat_len", type=int, default=16384, help="Length of RepeatOne dataset in of1 mode")
-    p.add_argument("--eval_mse_to_target", action="store_true")
-    p.add_argument("--sample_every", type=int, default=1)
-
+    p.add_argument("--img_size", type=int, default=128)
+    p.add_argument("--num_classes", type=int, default=3, help="Number of classes for conditioning.")
     # Model
-    p.add_argument("--channels", type=str, default="64,128,256,512")
+    p.add_argument("--channels", type=str, default="64,128,256,512", help="U-Net channel progression.")
     p.add_argument("--embed_dim", type=int, default=256)
-
-    # SDE schedule
-    p.add_argument("--sde", choices=["VE", "VPSDE"], default="VE")
-    p.add_argument("--sigma_max", type=float, default=25.0, help="VE sigma_max (ignored for VPSDE)")
-
-    # Sampler
-    p.add_argument("--sampler", choices=["pc", "em", "ode"], default="pc")
-    p.add_argument("--num_steps", type=int, default=500)
-    p.add_argument("--snr", type=float, default=0.16, help="SNR for Langevin corrector (PC)")
-    p.add_argument("--eps", type=float, default=1e-3, help="Final time for samplers")
-    p.add_argument("--sampler_noise_scale", type=float, default=1.0, help="Scale factor for sampler noise term.")
-    p.add_argument("--sampler_add_final_noise", action="store_true",
-                   help="If set, adds noise in the very last sampler step.")
-    p.add_argument("--debug_sampler", action="store_true",
-                   help="If set, runs a special sampler that saves intermediate steps to visualize convergence.")
-
-    # Optimizer / schedule / hygiene
+    # SDE/Sampler
+    p.add_argument("--sde", choices=["VE", "VPSDE"], default="VE", help="Type of SDE to use.")
+    p.add_argument("--sigma_max", type=float, default=25.0, help="Maximum sigma for VE SDE.")
+    p.add_argument("--sampler", choices=["pc", "em", "ode"], default="pc", help="Sampler to use for generation.")
+    p.add_argument("--num_steps", type=int, default=500, help="Number of steps for the sampler.")
+    # Training
     p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--min_lr", type=float, default=1e-5)
-    p.add_argument("--warmup_steps", type=int, default=1000)
-    p.add_argument("--schedule", choices=["const", "cosine"], default="cosine")
-    p.add_argument("--grad_clip", type=float, default=1.0)
-    p.add_argument("--weight_decay", type=float, default=1e-4)
-    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch_per_device", type=int, default=4)
-    p.add_argument("--sample_batch_size", type=int, default=8)
-    p.add_argument("--ckpt_every", type=int, default=1, help="Save a full checkpoint every N epochs.")
-    p.add_argument("--seed", type=int, default=0)
-
-    # EMA
-    p.add_argument("--ema_decay", type=float, default=0.9995)
-    p.add_argument("--ema_update_every", type=int, default=1, help="Update EMA every N steps")
-    p.add_argument("--use_ema_for_sampling", action="store_true")
-
-    # Experiment/run management
-    p.add_argument("--output_root", default="runs")
-    p.add_argument("--exp_name", default="cxr_sde")
-    p.add_argument("--run_name", default=None)
-    p.add_argument("--resume_dir", default=None, help="Resume from an existing run dir (loads last.flax if present)")
-
-    # Checkpointing (paths are auto-derived under run_dir; these are fallbacks/overrides)
-    p.add_argument("--ckpt_path", default=None)
-    p.add_argument("--samples_dir", default=None)
-
-    # WandB
-    p.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
-    p.add_argument("--wandb_project", default="cxr-sde")
-    p.add_argument("--wandb_entity", default=None)
-    p.add_argument("--wandb_tags", default="", help="Comma-separated tags")
-    p.add_argument("--wandb_id", default=None, help="Set to resume a specific W&B run id")
-
-    p.add_argument("--postfix_every_steps", type=int, default=25, help="How often tqdm.set_postfix runs (steps)")
-    p.add_argument("--log_every_steps", type=int, default=100, help="How often to log metrics (steps)")
+    p.add_argument("--sample_batch_size", type=int, default=18, help="Must be a multiple of num_classes.")
+    p.add_argument("--ema_decay", type=float, default=0.999)
+    # Logistics
+    p.add_argument("--output_root", default="runs", help="Root directory for experiment outputs.")
+    p.add_argument("--exp_name", default="cxr_conditional_sde")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--sample_every", type=int, default=5, help="Frequency of sampling (in epochs).")
+    p.add_argument("--ckpt_every", type=int, default=10, help="Frequency of checkpointing (in epochs).")
     return p.parse_args()
 
-
-# ---------------- Training entry ----------------
+# --- Helper Functions ---
+def ensure_dir(p): os.makedirs(p, exist_ok=True); return p
+def tree_ema_update(ema, new, decay): return jax.tree_map(lambda e, p: e * decay + (1.0 - decay) * p, ema, new)
 
 def main():
     args = parse_args()
 
-    # ---- Choose noise schedule (VE vs VPSDE) ----
-    try:
-        from diffusion.equations import vpsde_marginal_prob_std, vpsde_diffusion_coeff  # optional
-        _has_vpsde = True
-    except Exception:
-        _has_vpsde = False
+    # --- 1. Setup & Configuration ---
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir = ensure_dir(os.path.join(args.output_root, f"{args.exp_name}_{ts}"))
+    ckpt_dir = ensure_dir(os.path.join(run_dir, "ckpts"))
+    samples_dir = ensure_dir(os.path.join(run_dir, "samples"))
+    with open(os.path.join(run_dir, "config.json"), "w") as f:
+        json.dump(vars(args), f, indent=2)
 
-    if args.sde == "VE" or not _has_vpsde:
-        if args.sde != "VE":
-            print("[warn] VPSDE schedule not found in diffusion.equations; falling back to VE.")
-        sigma = float(args.sigma_max)
-        marginal_prob_std_fn = functools.partial(marginal_prob_std, sigma=sigma)
-        diffusion_coeff_fn   = functools.partial(diffusion_coeff,   sigma=sigma)
-        sde_label = f"VE(σmax={sigma:g})"
+    # Set up SDE functions based on user choice.
+    if args.sde == "VE":
+        marginal_prob_std_fn = functools.partial(marginal_prob_std, sigma=args.sigma_max)
+        diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=args.sigma_max)
     else:
         marginal_prob_std_fn = vpsde_marginal_prob_std
-        diffusion_coeff_fn   = vpsde_diffusion_coeff
-        sde_label = "VPSDE(cosine)"
+        diffusion_coeff_fn = vpsde_diffusion_coeff
 
-    # ---- Mode string and channels ----
-    mode = "full"
-    if args.overfit_one:
-        mode = "of1"
-    elif args.overfit_k > 0:
-        mode = f"tiny{args.overfit_k}"
+    # --- 2. Dataset and DataLoader ---
+    ds = ChestXrayDataset(root_dir=args.data_root, split=args.split, img_size=args.img_size)
+    if args.num_classes != len(ds.class_map):
+        raise ValueError(f"--num_classes={args.num_classes} but found {len(ds.class_map)} classes in data.")
 
-    channels = tuple(int(c.strip()) for c in args.channels.split(",") if c.strip())
+    batch_size = args.batch_per_device * jax.local_device_count()
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True, pin_memory=True)
 
-    # ---- Run directory ----
-    H = W = int(args.img_size)
-    per_dev = max(1, args.batch_per_device)
-    ndev = n_local_devices()
-    slurm_id = os.environ.get("SLURM_JOB_ID")
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-
-    exp_slug = (
-        f"{args.exp_name}"
-        f"-{args.task.lower()}-{args.split}"
-        f"-cxr{H}-{mode}"
-        f"-ch{'x'.join(map(str,channels))}"
-        f"-{args.sde.lower()}-{args.sampler}"
-        f"-lr{args.lr:g}-b{per_dev}x{ndev}"
-    )
-    if slurm_id:
-        exp_slug += f"-slurm{slurm_id}"
-
-    if args.resume_dir:
-        run_dir = args.resume_dir
-        print(f"[info] Resuming into: {run_dir}")
-    else:
-        base_run_name = args.run_name or exp_slug
-        run_dir = os.path.join(args.output_root, base_run_name, ts)
-
-    ckpt_dir    = ensure_dir(os.path.join(run_dir, "ckpts"))
-    samples_dir = ensure_dir(args.samples_dir or os.path.join(run_dir, "samples"))
-    meta_path   = os.path.join(run_dir, "run_meta.json")
-    ckpt_latest = os.path.join(ckpt_dir, "last.flax")
-
-    # ---- Persist config ----
-    cfg_dump = dict(vars(args))
-    cfg_dump.update({
-        "exp_slug": exp_slug,
-        "run_dir": run_dir,
-        "ckpt_latest": ckpt_latest,
-        "samples_dir": samples_dir,
-        "sde_label": sde_label,
-    })
-    ensure_dir(run_dir)
-    with open(meta_path, "w") as f:
-        json.dump(cfg_dump, f, indent=2, sort_keys=True)
-
-    # ---- RNG, dataset & loader ----
+    # --- 3. Model, Optimizer, and State Initialization ---
     rng = jax.random.PRNGKey(args.seed)
-    C = 1
+    H, W, C = args.img_size, args.img_size, 1
+    channels = tuple(int(c.strip()) for c in args.channels.split(","))
 
-    class_to_keep = 1 if args.disease else 0
-    print(f"[info] Training on {'diseased' if args.disease else 'normal'} data (class_filter={class_to_keep}).")
-    ds = ChestXrayDataset(
-        root_dir=args.data_root, task=args.task, split=args.split,
-        img_size=args.img_size, class_filter=class_to_keep
-    )
-    label_counts = Counter(ds.labels)
-    ds_size = len(ds)
-
-    if args.overfit_one:
-        first_img, _ = ds[0]  # (1,H,W) in [-1,1]
-        class RepeatOne(torch.utils.data.Dataset):
-            def __init__(self, img, length):
-                self.img, self.length = img.clone(), int(length)
-            def __len__(self): return self.length
-            def __getitem__(self, idx): return self.img, 0
-        train_ds = RepeatOne(first_img, length=max(args.repeat_len, ds_size))
-        target_np = first_img.numpy()
-    elif args.overfit_k > 0:
-        class FirstK(torch.utils.data.Dataset):
-            def __init__(self, base, k): self.base, self.k = base, int(k)
-            def __len__(self): return min(self.k, len(self.base))
-            def __getitem__(self, i): return self.base[i]
-        train_ds = FirstK(ds, args.overfit_k)
-        target_np = None
-    else:
-        train_ds = ds
-        target_np = None
-
-    batch_size = per_dev * ndev
-    loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=True
-    )
-
-    # ---- Model ----
     score_model = ScoreNet(
-        marginal_prob_std_fn,
+        marginal_prob_std=marginal_prob_std_fn,
         channels=channels,
         embed_dim=args.embed_dim,
-    )
-    fake_x = jnp.ones((batch_size, H, W, C), dtype=jnp.float32)
-    fake_t = jnp.ones((batch_size,), dtype=jnp.float32)
-    params = score_model.init({'params': rng}, fake_x, fake_t)
-
-    # ---- Optimizer (AdamW + clip + schedule) ----
-    steps_per_epoch = max(1, len(loader))
-    total_steps = args.epochs * steps_per_epoch
-    if args.schedule == "cosine":
-        lr_schedule = optax.warmup_cosine_decay_schedule(
-            init_value=0.0,
-            peak_value=args.lr,
-            warmup_steps=args.warmup_steps,
-            decay_steps=max(1, total_steps - args.warmup_steps),
-            end_value=args.min_lr,
-        )
-    else:
-        lr_schedule = args.lr
-
-    tx = optax.chain(
-        optax.clip_by_global_norm(args.grad_clip) if args.grad_clip and args.grad_clip > 0 else optax.identity(),
-        optax.adamw(learning_rate=lr_schedule, weight_decay=args.weight_decay),
+        num_classes=args.num_classes,  # This enables conditioning
     )
 
-    host_state = TrainState.create(
-        apply_fn=score_model.apply,
-        params=params,
-        tx=tx,
-    )
-    ema_params = host_state.params  # start EMA at init params
+    # Initialize model parameters with dummy data.
+    rng, init_rng = jax.random.split(rng)
+    fake_x = jnp.ones((1, H, W, C))
+    fake_t = jnp.ones((1,))
+    fake_y = jnp.zeros((1,), dtype=jnp.int32)
+    params = score_model.init({'params': init_rng}, fake_x, fake_t, fake_y)['params']
 
-    # ---- Resume from checkpoint if requested or present ----
-    resume_ckpt = None
-    if args.resume_dir and tf.io.gfile.exists(ckpt_latest):
-        resume_ckpt = ckpt_latest
-    elif args.ckpt_path and tf.io.gfile.exists(args.ckpt_path):
-        resume_ckpt = args.ckpt_path
+    # Create TrainState and EMA parameters.
+    tx = optax.adamw(learning_rate=args.lr)
+    state = TrainState.create(apply_fn=score_model.apply, params=params, tx=tx)
+    ema_params = state.params
 
-    if resume_ckpt:
-        print(f"[info] Loading checkpoint from {resume_ckpt}")
-        with tf.io.gfile.GFile(resume_ckpt, "rb") as f:
-            blob = f.read()
-        # Try new format first: (TrainState, ema_params, ema_decay)
-        try:
-            host_state, ema_params, loaded_decay = from_bytes(
-                (host_state, ema_params, args.ema_decay), blob
-            )
-            # keep CLI value if user set it; otherwise adopt loaded
-            if "ema_decay" not in vars(args) or args.ema_decay is None:
-                args.ema_decay = float(loaded_decay)
-            print("[info] Loaded (TrainState, EMA, decay).")
-        except Exception:
-            # Fallback: plain TrainState (older runs). Use params as EMA.
-            try:
-                host_state = from_bytes(host_state, blob)
-                ema_params = host_state.params
-                print("[warn] Loaded plain TrainState; initializing EMA from params.")
-            except Exception as e:
-                print(f"[warn] Could not deserialize checkpoint in any known format: {e}")
-                print("[warn] Starting fresh.")
-    else:
-        print("[info] No checkpoint; fresh training.")
-
-    # ---- Replicate & get pmapped step ----
-    state = jax.device_put_replicated(host_state, jax.local_devices())
+    # Replicate state across all devices for pmap.
+    replicated_state = jax.device_put_replicated(state, jax.local_devices())
     train_step_fn = get_train_step_fn(score_model, marginal_prob_std_fn)
 
-    # ---- Weights & Biases init ----
-    use_wandb = bool(args.wandb and _WANDB_AVAILABLE)
-    if args.wandb and not _WANDB_AVAILABLE:
-        print("[warn] wandb requested, but not installed. Proceeding without online logging.")
-    run_name = args.run_name or exp_slug
-    wandb_run = None
-    if use_wandb:
-        wandb_tags = [t.strip() for t in args.wandb_tags.split(",") if t.strip()]
-        wandb_config = {**vars(args),
-                        "exp_slug": exp_slug,
-                        "run_dir": run_dir,
-                        "ds_size": ds_size,
-                        "label_counts": dict(label_counts),
-                        "n_local_devices": ndev,
-                        "effective_batch": batch_size,
-                        "sde_label": sde_label}
-        wandb_run = wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=run_name,
-            group=args.exp_name,
-            job_type=mode,
-            tags=wandb_tags,
-            config=wandb_config,
-            id=args.wandb_id,
-            resume="allow" if args.wandb_id else None,
-            dir=run_dir,
-        )
-        wandb.define_metric("train/step")
-        wandb.define_metric("train/*", step_metric="train/step")
-        wandb.define_metric("epoch/*", step_metric="epoch/idx")
-        table = wandb.Table(columns=["label", "count"])
-        for k, v in sorted(label_counts.items()):
-            table.add_data(str(k), int(v))
-        wandb.log({"dataset/summary": table, "epoch/idx": 0})
-
-    # ---- Train ----
+    # --- 4. Training Loop ---
     global_step = 0
-    running_loss = 0.0
-    running_count = 0
+    for epoch in tqdm.trange(args.epochs, desc="Epochs"):
+        inner_loop = tqdm.tqdm(loader, desc=f"Training Epoch {epoch + 1}", leave=False)
+        for x_pt, y_pt in inner_loop:
+            # Prepare batch for JAX: Move to NumPy and reshape for sharding.
+            x_np = x_pt.permute(0, 2, 3, 1).numpy()
+            y_np = y_pt.numpy()
+            sharded_x = x_np.reshape(jax.local_device_count(), -1, H, W, C)
+            sharded_y = y_np.reshape(jax.local_device_count(), -1)
 
-    # Host copies for EMA updates/sampling/checkpoint
-    host_params_last = jax.tree_map(lambda x: np.array(x), host_state.params)
-    ema_params = jax.tree_map(lambda x: np.array(x), ema_params)
+            # Generate a unique random key for each device.
+            rng, *step_rngs = jax.random.split(rng, jax.local_device_count() + 1)
+            step_rngs = jnp.asarray(step_rngs)
 
-    for epoch in tqdm.trange(args.epochs, desc="epochs"):
-        losses = []
-        inner = tqdm.tqdm(loader, desc=f"epoch {epoch+1}/{args.epochs}", leave=False)
-        for x, _ in inner:
-            # Torch (B,1,H,W) in [-1,1] -> JAX NHWC [0,1]
-            x = x.permute(0, 2, 3, 1).contiguous()
-            x = (x + 1.0) * 0.5
-            x_np = x.numpy()
-            x_np = to_pmap_batch(x_np, H, W, C)
+            # Execute one training step.
+            loss, replicated_state = train_step_fn(step_rngs, sharded_x, sharded_y, replicated_state)
+            inner_loop.set_postfix(loss=f"{loss[0]:.4f}")
 
-            rng, *step_rng = jax.random.split(rng, n_local_devices() + 1)
-            step_rng = jnp.asarray(step_rng)
-            loss, state = train_step_fn(step_rng, x_np, state)
-            loss_val = float(jax.device_get(loss)[0])
-            losses.append(loss_val)
-
-            # Host pull params for EMA (every N steps to reduce overhead)
+            # Update Exponential Moving Average of parameters.
+            params_host = jax.device_get(jax.tree_map(lambda x: x[0], replicated_state.params))
+            ema_params = tree_ema_update(ema_params, params_host, args.ema_decay)
             global_step += 1
-            if (global_step % max(1, args.ema_update_every)) == 0:
-                host_params_step = jax.device_get(jax.tree_map(lambda v: v[0], state.params))
-                ema_params = tree_ema_update(ema_params, host_params_step, args.ema_decay)
-                host_params_last = host_params_step
 
-            running_loss += loss_val
-            running_count += 1
-            if (global_step % max(1, args.postfix_every_steps)) == 0:
-                inner.set_postfix(loss=f"{loss_val:.4f}")
-
-            if use_wandb and (global_step % max(1, args.log_every_steps) == 0):
-                mean_loss = running_loss / max(1, running_count)
-                wandb.log({"train/loss": mean_loss, "train/step": global_step})
-                running_loss = 0.0
-                running_count = 0
-
-        # Save checkpoint (include EMA)
-        host_state_to_save = jax.device_get(jax.tree_map(lambda v: v[0], state))
-        payload_bytes = to_bytes((host_state_to_save, ema_params, args.ema_decay))
-        with tf.io.gfile.GFile(ckpt_latest, "wb") as f:
-            f.write(payload_bytes)
-
-        # Only save the numbered epoch checkpoint periodically
-        if (epoch + 1) % max(1, args.ckpt_every) == 0:
-            ep_path = os.path.join(ckpt_dir, f"ep{epoch + 1:04d}.flax")
-            with tf.io.gfile.GFile(ep_path, "wb") as f:
-                f.write(payload_bytes)
-            if use_wandb:
-                wandb.log({"ckpt/epoch_path": ep_path, "epoch/idx": epoch + 1})
-
-        avg_loss = float(np.mean(losses)) if len(losses) else float("nan")
-        print(f"[epoch {epoch+1}] avg loss: {avg_loss:.6f}")
-
-        if use_wandb:
-            wandb.log({"epoch/avg_loss": avg_loss, "epoch/idx": epoch + 1,
-                       "ckpt/last_path": ckpt_latest})
-
-        # --- Periodic sampling ---
-        if ((epoch + 1) % max(1, args.sample_every)) == 0:
-            params_for_sampling = ema_params if args.use_ema_for_sampling else host_params_last
-            images, eval_dict, rng = sample_and_log(
-                rng_key=rng,
-                score_model=score_model,
-                params=params_for_sampling,
-                H=H, W=W, img_size=args.img_size,
-                batch_size=args.sample_batch_size,
-                out_dir=samples_dir,
-                epoch=epoch + 1,
-                target_np=target_np,
-                args=args,
+        # --- 5. Periodic Sampling and Checkpointing ---
+        if (epoch + 1) % args.sample_every == 0:
+            sample_and_log_conditional(
+                rng, score_model, ema_params, args, epoch + 1, samples_dir, ds.class_map, diffusion_coeff_fn
             )
-            if use_wandb:
-                wandb_imgs = [wandb.Image(img, caption=cap) for cap, img in images]
-                log_payload = {"samples/grid": wandb_imgs, "epoch/idx": epoch+1}
-                log_payload.update({f"eval/{k}": v for k, v in eval_dict.items()})
-                wandb.log(log_payload)
 
-    print(f"[done] run dir: {run_dir}")
-    if use_wandb:
-        wandb.finish()
+        if (epoch + 1) % args.ckpt_every == 0:
+            state_host = jax.device_get(jax.tree_map(lambda x: x[0], replicated_state))
+            payload = to_bytes((state_host, ema_params))
+            path = os.path.join(ckpt_dir, f"epoch_{epoch + 1}.flax")
+            with open(path, "wb") as f: f.write(payload)
+            print(f"\nSaved checkpoint: {path}")
 
 
-# ---------------- Sampling helper ----------------
-def sample_and_log(rng_key,
-                   score_model,
-                   params,
-                   H, W, img_size, batch_size,
-                   out_dir, epoch, target_np, args):
-    """Returns (images_to_log, eval_metrics) where images_to_log is a list of (caption, image-array)."""
-    import matplotlib.pyplot as plt
+def sample_and_log_conditional(rng, model, params, args, epoch, out_dir, class_map, diffusion_coeff_fn):
     from torchvision.utils import save_image
+    print(f"\n--- Starting sampling for epoch {epoch} ---")
 
-    # Choose sampler
-    sampler_name = (args.sampler or "pc").lower()
-    num_steps = args.num_steps
-    snr = args.snr
-    eps = args.eps
-    noise_scale = args.sampler_noise_scale
-    add_final_noise = args.sampler_add_final_noise
-    marginal_prob_std_fn = score_model.marginal_prob_std
-    from diffusion.equations import diffusion_coeff, vpsde_diffusion_coeff
-    if args.sde == "VE":
-        sigma = float(args.sigma_max)
-        diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma)
-    else:
-        diffusion_coeff_fn = vpsde_diffusion_coeff
-    if args.debug_sampler:
-        print("[info] Running in debug sampler mode. This will be slow and save many images.")
-        rng_key = jax.random.fold_in(rng_key, int(epoch))
-        rng_key, step_rng = jax.random.split(rng_key)
-        samples = Euler_Maruyama_debugger(
-            step_rng, score_model, params, marginal_prob_std_fn, diffusion_coeff_fn,
-            batch_size=batch_size, img_size=img_size, num_steps=num_steps,
-            out_dir=out_dir, epoch=epoch + 1
+    H, W = args.img_size, args.img_size
+    devices = jax.local_device_count()
+    if args.sample_batch_size % args.num_classes != 0:
+        print(f"[Warning] sample_batch_size {args.sample_batch_size} not easily divisible by num_classes {args.num_classes}.")
+    samples_per_class = args.sample_batch_size // args.num_classes
+
+    all_samples = []
+    class_names = sorted(class_map, key=class_map.get)
+
+    sampler_fn = {'pc': pc_sampler, 'em': Euler_Maruyama_sampler, 'ode': ode_sampler}[args.sampler]
+
+    for i, class_name in enumerate(class_names):
+        print(f"Sampling for class '{class_name}' (label {i})...")
+        rng, sample_rng = jax.random.split(rng)
+
+        # Create conditional labels, sharded for pmap.
+        y_cond_flat = jnp.full((samples_per_class * devices,), i, dtype=jnp.int32)
+        y_cond = y_cond_flat.reshape(devices, -1)
+
+        samples = sampler_fn(
+            sample_rng, model, params,
+            marginal_prob_std=model.marginal_prob_std,
+            diffusion_coeff=diffusion_coeff_fn, # BUG FIX: Use the correct diffusion_coeff
+            batch_size=samples_per_class * devices,
+            img_size=args.img_size,
+            num_steps=args.num_steps,
+            y_cond=y_cond
         )
-        # The debug sampler already saves its output, but we return the final grid for logging
-        eval_metrics = {}
-        grid = make_grid_torch(torch.tensor(np.asarray(samples)).reshape(-1, 1, H, W))
-        grid_np = np.clip(grid.permute(1, 2, 0).numpy(), 0.0, 1.0)
-        return [("final_debug_sample_grid", grid_np)], eval_metrics, rng_key
+        all_samples.append(samples)
 
-    if sampler_name in ("pc", "predictor-corrector"):
-        def _run(rng):
-            return pc_sampler(rng, score_model, params, marginal_prob_std_fn, diffusion_coeff_fn,
-                              batch_size=batch_size, img_size=img_size, num_steps=num_steps,
-                              snr=snr, eps=eps, noise_scale=noise_scale, add_final_noise=add_final_noise)
-    elif sampler_name in ("em", "euler", "euler-maruyama"):
-        def _run(rng):
-            return Euler_Maruyama_sampler(rng, score_model, params, marginal_prob_std_fn, diffusion_coeff_fn,
-                                          batch_size=batch_size, num_steps=num_steps, eps=eps, img_size=img_size,
-                                          noise_scale=noise_scale, add_final_noise=add_final_noise)
-    elif sampler_name in ("ode", "pf-ode", "probability-flow-ode"):
-        def _run(rng):
-            return ode_sampler(rng, score_model, params, marginal_prob_std_fn, diffusion_coeff_fn,
-                               batch_size=batch_size, img_size=img_size, eps=eps)
-    else:
-        raise ValueError(f"Unknown sampler: {sampler_name}")
+    # Combine samples from all classes and save a grid.
+    final_samples = jnp.concatenate(all_samples, axis=1)  # Combine along batch axis
+    final_samples = jnp.clip(final_samples.reshape(-1, H, W, 1), 0.0, 1.0)
+    final_samples_pt = torch.tensor(np.asarray(final_samples)).permute(0, 3, 1, 2)
 
-    rng_key = jax.random.fold_in(rng_key, int(epoch))
-    rng_key, step_rng = jax.random.split(rng_key)
-    samples = _run(step_rng)
-    samples = jnp.clip(samples, 0.0, 1.0)
-    samples = jnp.transpose(samples.reshape((-1, H, W, 1)), (0, 3, 1, 2))
-    samples_t = torch.tensor(np.asarray(samples))
-
-    eval_metrics = {}
-    if (target_np is not None):
-        target01 = (target_np + 1.0) * 0.5  # [-1,1] -> [0,1]
-        target01 = np.expand_dims(target01, axis=0)     # (1,1,H,W)
-        diff = samples_t.numpy() - target01
-        mse = np.mean(diff * diff, axis=(1, 2, 3))
-        eval_metrics["mse_best"] = float(np.min(mse))
-        eval_metrics["mse_mean"] = float(np.mean(mse))
-        print(f"[eval] epoch {epoch} MSE-to-target: best={eval_metrics['mse_best']:.6f}, "
-              f"mean={eval_metrics['mse_mean']:.6f}")
-
-    grid = make_grid_torch(samples_t)
-    grid_np = grid.permute(1, 2, 0).numpy()
-    grid_np = np.clip(grid_np, 0.0, 1.0)
-
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    ensure_dir(out_dir)
-    out_matplotlib = os.path.join(out_dir, f"grid_ep{epoch:03d}_{ts}.png")
-    out_torchvision = os.path.join(out_dir, f"grid_ep{epoch:03d}_{ts}_tv.png")
-
-    # Matplotlib save
-    plt.figure(figsize=(6, 6))
-    plt.axis("off")
-    plt.imshow(grid_np, vmin=0., vmax=1.)
-    plt.tight_layout()
-    plt.savefig(out_matplotlib, bbox_inches="tight", pad_inches=0)
-    plt.close()
-
-    # Torchvision save
-    save_image(grid, out_torchvision)
-    print(f"[saved] {out_matplotlib}\n[saved] {out_torchvision}")
-    return [("sample_grid", grid_np)], eval_metrics, rng_key
+    grid_path = os.path.join(out_dir, f"grid_epoch_{epoch:04d}.png")
+    save_image(final_samples_pt, grid_path, nrow=samples_per_class)
+    print(f"Saved conditional sample grid to {grid_path}")
 
 
 if __name__ == "__main__":
+    # To prevent TensorFlow from occupying GPU memory.
+    # This is important if you're using TF for data loading but JAX for training.
+    import tensorflow as tf
+    tf.config.experimental.set_visible_devices([], "GPU")
     main()
