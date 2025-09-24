@@ -1,12 +1,9 @@
-from functools import partial
 import jax
 import jax.numpy as jnp
 from flax.training.train_state import TrainState
 from typing import Callable, Tuple
 from flax import linen as nn
 
-# This import assumes your SDE definitions are in a 'diffusion' directory.
-from diffusion.equations import marginal_prob_std_fn
 
 def loss_fn(
     rng: jax.Array,
@@ -14,7 +11,7 @@ def loss_fn(
     params: dict,
     x: jnp.ndarray,
     y: jnp.ndarray,
-    marginal_prob_std: marginal_prob_std_fn,
+    marginal_prob_std: Callable, # <-- MODIFIED: Correct type hint
     eps: float = 1e-5
 ) -> jnp.ndarray:
     """
@@ -53,25 +50,12 @@ def loss_fn(
 
 def get_train_step_fn(
     model: nn.Module,
-    marginal_prob_std: marginal_prob_std_fn
-) -> Callable[[jax.random.KeyArray, jnp.ndarray, jnp.ndarray, TrainState], Tuple[jnp.ndarray, TrainState]]:
-    """
-    Creates a pmapped, one-step training function for the conditional model.
-
-    Args:
-        model: The score-based model (e.g., ScoreNet).
-        marginal_prob_std: A function that gives the standard deviation of the
-                           perturbation kernel.
-
-    Returns:
-        A function that takes a PRNG key, a sharded batch of images and labels,
-        and the training state, and returns the loss and updated state.
-    """
-    # Create a function that computes both the loss and its gradient.
+    marginal_prob_std: Callable # <-- MODIFIED: Correct type hint
+) -> Callable[[jax.Array, jnp.ndarray, jnp.ndarray, TrainState], Tuple[jnp.ndarray, TrainState]]:
     val_and_grad_fn = jax.value_and_grad(loss_fn, argnums=2)
 
     def step_fn(
-        rng: jax.random.KeyArray,
+        rng: jax.Array, # <-- MODIFIED: Correct type hint
         x: jnp.ndarray,
         y: jnp.ndarray,
         state: TrainState
@@ -79,16 +63,10 @@ def get_train_step_fn(
         """A single training step."""
         params = state.params
         loss, grad = val_and_grad_fn(rng, model, params, x, y, marginal_prob_std)
-
-        # Average gradients and loss across all devices.
         mean_grad = jax.lax.pmean(grad, axis_name='device')
         mean_loss = jax.lax.pmean(loss, axis_name='device')
-
-        # Update model parameters.
         new_state = state.apply_gradients(grads=mean_grad)
 
         return mean_loss, new_state
-
-    # pmap the step function for parallel execution on multiple devices.
-    # Note the in_axes: rng, x, and y are sharded; state is replicated.
     return jax.pmap(step_fn, in_axes=(0, 0, 0, None), axis_name='device')
+

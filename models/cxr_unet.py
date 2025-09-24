@@ -33,18 +33,17 @@ class GaussianFourierProjectionV2(nn.Module):
         t = jnp.asarray(t).reshape(-1)  # (B,)
         D = self.embed_dim // 2
 
-        # Initialize the projection matrix W with shape (D,). Flax will handle
-        # batching automatically.
-        def _normal_init(key, shape):
-            return jax.random.normal(key, shape) * self.scale
+        # Initialize the projection matrix W.
+        # By initializing with shape (1, D), we are explicit and avoid potential
+        # shape inference issues across different Flax versions or runs.
+        def _normal_init(key, shape, dtype=jnp.float32):
+            return jax.random.normal(key, shape, dtype) * self.scale
 
-        W = self.param('W_v2', _normal_init, (D,))
-        W = jax.lax.stop_gradient(W)  # Keep features fixed during training.
+        W = self.param('W_v2', _normal_init, (1, D)) # <-- MODIFIED: Explicit 2D shape
+        W = jax.lax.stop_gradient(W)
 
-        # Broadcasting magic:
-        # t is reshaped to (B, 1). When multiplied by W with shape (D,),
-        # JAX broadcasts them to produce a (B, D) matrix.
-        t_proj = t[:, None] * W * (2.0 * jnp.pi)  # (B, D)
+        # Broadcasting: (B, 1) * (1, D) -> (B, D)
+        t_proj = t[:, None] * W * (2.0 * jnp.pi)
 
         # Final Fourier embedding using sine and cosine.
         return jnp.concatenate([jnp.sin(t_proj), jnp.cos(t_proj)], axis=-1)
@@ -189,3 +188,4 @@ class ScoreNet(nn.Module):
         out = nn.Conv(x.shape[-1], (3,3), strides=(1,1), padding='SAME')(u1)
         out = out / self.marginal_prob_std(t)[:, None, None, None]
         return out
+

@@ -20,7 +20,7 @@ import numpy as np
 import optax
 import torch
 import tqdm
-from flax.serialization import from_bytes, to_bytes
+from flax.serialization import  to_bytes
 from flax.training.train_state import TrainState
 from torch.utils.data import DataLoader
 

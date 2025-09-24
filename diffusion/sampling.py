@@ -2,14 +2,11 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax import random
 import tqdm
 from scipy import integrate
 from typing import Optional, Callable
-import flax.linen as nn # <-- ADDED: Import for nn.Module type hint
+import flax.linen as nn
 
-# This import assumes your SDE definitions are in a 'diffusion' directory.
-# from diffusion.equations import sde_fn_type # <-- REMOVED: This type alias doesn't exist.
 
 def make_pmap_score_fn(score_model: nn.Module, conditional: bool) -> Callable:
     """
