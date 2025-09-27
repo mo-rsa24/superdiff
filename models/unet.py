@@ -46,7 +46,7 @@ class ScoreNet(nn.Module):
         embed_dim: The dimensionality of Gaussian random feature embeddings.
     """
     marginal_prob_std: Any
-    channels: Tuple[int] = (32, 64, 128, 256)
+    channels: Tuple[int, ...] = (32, 64, 128, 256)
     embed_dim: int = 256
 
     @nn.compact

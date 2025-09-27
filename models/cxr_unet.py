@@ -5,7 +5,7 @@ import flax.linen as nn
 from typing import Any, Tuple
 
 class GaussianFourierProjection(nn.Module):
-    embed_dim: int
+    embed_dim: int #
     scale: float = 30.
     @nn.compact
     def __call__(self, x):
