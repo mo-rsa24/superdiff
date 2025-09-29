@@ -29,92 +29,42 @@ def sampler_superdiff_and_sde(rng, model_a, pa, model_b, pb,
                               marginal_prob_std_fn, diffusion_coeff_fn,
                               shape, num_steps=500, eps=1e-3,
                               log_dir=None, do_diagnostics=False):
-    """
-    Faithfully implements the SUPERDIFF logical AND using a reverse-SDE sampler.
-
-    This method calculates a dynamic, time-dependent weight `κ` at each step
-    to solve for the optimal combination of scores `sA` and `sB`, as described
-    in the SUPERDIFF paper and its reference implementation.
-
-    NOTE: This implementation makes two necessary assumptions to adapt the logic
-    from the paper's Stable Diffusion (PyTorch/DDPM) notebook to this script's
-    unconditional (JAX/VE SDE) framework:
-      1. Classifier-Free Guidance is not used, so the `guidance_scale` is set to 1.0.
-      2. The change in noise level `dsigma` is approximated from the VE SDE's
-         continuous-time `marginal_prob_std_fn`.
-    """
     B = shape[0]
     rng, sub = jax.random.split(rng)
-    # Initialize noise from the prior distribution at t=1
     x = jax.random.normal(sub, shape) * marginal_prob_std_fn(1.0)
-
-    # Create the reverse-time integration grid
     t_grid = make_time_grid(eps, num_steps, x.dtype, reverse=True)
     dt = t_grid[0] - t_grid[1]
     sqrt_dt = jnp.sqrt(dt)
-
-    # Diagnostics containers
     kappa_list = []
 
     for i, t in enumerate(t_grid):
         t_batch = jnp.full((B,), t, dtype=x.dtype)
-
-        # 1. Calculate the scores from both of your unconditional models
-        # Model A can be considered the 'object' and Model B the 'background'
         sA = score_fn(model_a, pa, x, t_batch)  # s_obj
         sB = score_fn(model_b, pb, x, t_batch)  # s_bg
-
-        # --- Dynamic Kappa Calculation (The Core of SUPERDIFF AND) ---
-
-        # 2. Get the SDE coefficients for the current timestep `t`
         g = diffusion_coeff_fn(t_batch)
         g2 = broadcast_g2(g, x)
-
-        # 3. Approximate `dsigma`, the change in noise std deviation over the step `dt`.
-        # This is required by the SUPERDIFF formula.
         sigma_curr = marginal_prob_std_fn(t_batch)
         sigma_next = marginal_prob_std_fn(t_batch - dt)
-        dsigma = sigma_curr - sigma_next  # Should be positive as we go from t=1 to t=eps
-
-        # 4. Calculate the hypothetical update `dx_ind` using only the 'background' model (sB)
-        # This is a necessary component for the kappa formula.
+        dsigma = sigma_curr - sigma_next
         rng, sub = jax.random.split(rng)
         noise = jax.random.normal(sub, x.shape)
         drift_B = -0.5 * g2 * sB
         dx_ind = drift_B * dt + g.reshape((-1,) + (1,) * (x.ndim - 1)) * noise * sqrt_dt
-
-        # 5. Solve for kappa `κ` using the closed-form solution from the paper's logic
         s_diff = sA - sB
         s_sum = sA + sB
-
-        # Numerator of the kappa equation
-        # Note: In the reference code, (vel_bg-vel_obj) is used, so we use (sB-sA)
-        # The equation is: abs(dsigma)*(sB-sA)*(sB+sA) - (dx_ind*(sA-sB))
         num_term1 = (jnp.abs(dsigma.reshape(-1, 1, 1, 1)) * (sB - sA) * s_sum).sum(axis=(1, 2, 3))
         num_term2 = (dx_ind * s_diff).sum(axis=(1, 2, 3))
         numerator = num_term1 - num_term2
-
-        # Denominator of the kappa equation
         guidance_scale = 1.0  # Assuming no CFG, so scale is 1
-        denominator = 2 * dsigma.reshape(-1, 1, 1, 1) * guidance_scale * _l2_norm_sq(s_diff)
+        denominator = 2 * dsigma * guidance_scale * _l2_norm_sq(s_diff)
 
         kappa = numerator / denominator
 
         if do_diagnostics:
             kappa_list.append(np.asarray(kappa.mean()))
-
-        # --- End of Kappa Calculation ---
-
-        # 6. Form the composed score `s_combined` using the calculated kappa
-        # The composition is: s_bg + kappa * (s_obj - s_bg)
         s_combined = sB + kappa[:, None, None, None] * s_diff
-
-        # 7. Perform the reverse-SDE update step using the dynamically composed score
         drift_combined = -0.5 * g2 * s_combined
-        # Use the *same noise* that was generated for the kappa calculation for a consistent update
         x = x + drift_combined * dt + g.reshape((-1,) + (1,) * (x.ndim - 1)) * noise * sqrt_dt
-
-    # Save diagnostics plot for kappa if enabled
     if do_diagnostics and log_dir is not None:
         save_plot([kappa_list], ["kappa"], "Dynamic Kappa (κ) over steps",
                   os.path.join(log_dir, "kappa_dynamic_sde.png"),
@@ -458,59 +408,6 @@ def main(args):
     # Use VE functions from run A (compat asserted)
     marginal_prob_std_fn = mstd_a
     diffusion_coeff_fn = dcoeff_a
-
-    # # -------------------------
-    # # (1) PoE ODE
-    # # -------------------------
-    # print("[*] Running PoE ODE sampler ...")
-    # rng, sub = jax.random.split(rng)
-    # samples_ode = sampler_poe_ode(
-    #     sub, model_a, params_a, model_b, params_b,
-    #     marginal_prob_std_fn, diffusion_coeff_fn,
-    #     sample_shape, num_steps=args.num_steps, eps=args.eps,
-    #     log_dir=diag_dir, do_diagnostics=True
-    # )
-    # to_torch_grid_and_save(
-    #     np.asarray(samples_ode),
-    #     os.path.join(out_dir, "poe_ode_grid.png"),
-    #     nrow=int(math.sqrt(args.batch_size)),
-    #     cmap='gray'
-    # )
-    #
-    # # -------------------------
-    # # (2) Temperature grid (PoE ODE with λA, λB)
-    # # -------------------------
-    # print("[*] Running temperature grid (PoE ODE) ...")
-    # # Define a reasonable sweep; feel free to change
-    # lambdas = []
-    # for lamA in args.lambda_list:
-    #     for lamB in args.lambda_list:
-    #         lambdas.append((lamA, lamB))
-    #
-    # rng, sub = jax.random.split(rng)
-    # samples_temp, labels = sampler_temp_grid_ode(
-    #     sub, model_a, params_a, model_b, params_b,
-    #     marginal_prob_std_fn, diffusion_coeff_fn,
-    #     sample_shape, lambdas, num_steps=args.num_steps, eps=args.eps
-    # )
-    #
-    # # Save one big grid
-    # to_torch_grid_and_save(
-    #     np.asarray(samples_temp),
-    #     os.path.join(temp_dir, "poe_temp_grid_all.png"),
-    #     nrow=len(args.lambda_list)*int(math.sqrt(args.batch_size)),
-    #     cmap='gray'
-    # )
-    # # Also save per-(λA,λB)
-    # bs = args.batch_size
-    # for i, (lamA, lamB) in enumerate(labels):
-    #     block = np.asarray(samples_temp[i*bs:(i+1)*bs])
-    #     outp = os.path.join(temp_dir, f"lamA_{lamA:.2f}_lamB_{lamB:.2f}.png")
-    #     to_torch_grid_and_save(block, outp, nrow=int(math.sqrt(bs)), cmap='gray')
-
-    # -------------------------
-    # (3) PoE reverse-SDE
-    # -------------------------
     print("[*] Running PoE reverse-SDE sampler ...")
     rng, sub = jax.random.split(rng)
     samples_sde = sampler_superdiff_and_sde(
